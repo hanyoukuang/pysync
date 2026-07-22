@@ -52,8 +52,8 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
+          container: off
           args: --release --out dist
-          manylinux: auto
 
       - name: Upload Wheels as Artifacts
         uses: actions/upload-artifact@v4
