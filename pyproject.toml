@@ -4,12 +4,12 @@ build-backend = "maturin"
 
 [project]
 name = "pysync-nogil"
-version = "0.1.1"
-description = "High-Performance Modern Concurrency Primitives for Python 3.14+ (Free-Threaded No-GIL)"
+version = "0.1.2"
+description = "High-Performance Modern Concurrency Primitives for Free-Threaded Python 3.14t (No-GIL)"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 license = { text = "MIT" }
-keywords = ["concurrency", "free-threaded", "no-gil", "pysync", "rust", "pyo3", "lock-free", "channel", "atomic", "rwlock"]
+keywords = ["python3-14t", "free-threaded", "no-gil", "pysync", "rust", "pyo3", "lock-free", "channel", "atomic", "rwlock"]
 authors = [
     { name = "Han Youkuang" }
 ]
@@ -18,7 +18,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Programming Language :: Rust",
     "Topic :: Software Development :: Libraries :: Python Modules",
