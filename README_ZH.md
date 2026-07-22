@@ -1,10 +1,25 @@
 # pysync: 专为 Python 3.14t (自由线程 / No-GIL) 打造的高性能现代并发原语库
 
+[![CI/CD](https://github.com/hanyoukuang/pysync/actions/workflows/ci.yml/badge.svg)](https://github.com/hanyoukuang/pysync/actions)
+[![PyPI](https://img.shields.io/pypi/v/pysync-nogil.svg)](https://pypi.org/project/pysync-nogil/)
+[![Python 3.14t](https://img.shields.io/badge/python-3.14t_free--threaded-blue.svg)](https://docs.python.org/3.14/)
+[![License MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 [English Version](https://github.com/hanyoukuang/pysync/blob/main/README.md)
 
 `pysync` 是一个专为 **Python 3.14t 自由线程（无 GIL，free-threaded）** 环境打造的高性能并发原语库。
 
 设计上吸取了 **Go、Rust、Java 及 Akka** 等现代语言与经典并发库的 API 精髓，底层基于原生 Rust (PyO3) 构建，在无 GIL 的 Python 3.14 运行时下提供**百万级吞吐、极速无锁、防死锁保护**的并发体验。
+
+---
+
+## 🔮 愿景与 Python 3.17+ 展望 (Vision & Roadmap)
+
+根据 CPython 官方 PEP 703 路线图，**无 GIL 自由线程 (Free-Threading)** 将在 Python 3.17+ 及后续版本中成为 **默认 (Default) 运行模式**。
+
+`pysync` 项目致力于为这一历史性的 Python 性能革命探索并搭建最前沿的并发基础设施：
+* **前瞻探索**：提前为 Python 开发者提供 Go/Rust 级别的硬件级无锁原子操作与 CSP 通道架构。
+* **拥抱 Python 3.17+ 默认无 GIL 时代**：为生态持续输出生产级、高吞吐、强一致的现代并发原语，推动 Python 社区迈向真正的并行时代。
 
 ---
 

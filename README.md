@@ -1,10 +1,25 @@
 # pysync: Modern High-Performance Concurrency Primitives for Python 3.14t (Free-Threaded No-GIL)
 
+[![CI/CD](https://github.com/hanyoukuang/pysync/actions/workflows/ci.yml/badge.svg)](https://github.com/hanyoukuang/pysync/actions)
+[![PyPI](https://img.shields.io/pypi/v/pysync-nogil.svg)](https://pypi.org/project/pysync-nogil/)
+[![Python 3.14t](https://img.shields.io/badge/python-3.14t_free--threaded-blue.svg)](https://docs.python.org/3.14/)
+[![License MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 [中文版](https://github.com/hanyoukuang/pysync/blob/main/README_ZH.md)
 
 `pysync` is a high-performance modern concurrency library designed specifically for **Python 3.14t free-threaded (GIL-free)** environments.
 
 Drawing design inspiration from **Go, Rust, Java, and Akka**, `pysync` combines native Rust performance (via PyO3) with ergonomic Python APIs to deliver **million-level throughput, lock-free operations, and built-in deadlock prevention**.
+
+---
+
+## 🔮 Vision & Python 3.17+ Roadmap
+
+According to CPython's official PEP 703 roadmap, **Free-Threading (No-GIL)** is planned to become the **default execution mode** in Python 3.17+ and beyond.
+
+The `pysync` project is dedicated to pioneering and building the concurrency infrastructure for this historic Python performance revolution:
+* **Forward-Looking Innovation**: Providing Python developers today with hardware-level lock-free atomics and Go/Rust-style CSP channels.
+* **Embracing Python 3.17+ Default No-GIL Era**: Delivering production-grade, high-throughput concurrency primitives to empower the next generation of parallel Python applications.
 
 ---
 
