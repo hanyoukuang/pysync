@@ -232,6 +232,9 @@ pytest tests/
 ## 🧪 Testing & Benchmarks
 
 ```bash
+# Install from PyPI
+pip install pysync-nogil
+
 # Run unit tests (364 tests, ~7 seconds)
 pytest tests/
 

@@ -3,7 +3,7 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "pysync"
+name = "pysync-nogil"
 version = "0.1.0"
 description = "针对 Python 3.14 自由线程的高性能现代并发原语库"
 requires-python = ">=3.13"

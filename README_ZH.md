@@ -232,6 +232,9 @@ pytest tests/
 ## 🧪 测试与性能实测
 
 ```bash
+# 从 PyPI 安装
+pip install pysync-nogil
+
 # 运行单元测试套件 (364 项，~7 秒完成)
 pytest tests/
 
