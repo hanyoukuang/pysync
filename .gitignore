@@ -1,0 +1,106 @@
+# ==============================================================================
+# pysync Master Git Exclusion Rules (Cross-Platform: macOS, Windows, Linux)
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Virtual Environments & Python Runtime
+# ------------------------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+bin/
+include/
+lib/
+lib64/
+share/
+
+# ------------------------------------------------------------------------------
+# 2. Rust & Maturin Build Artifacts
+# ------------------------------------------------------------------------------
+target/
+**/*.rs.bk
+Cargo.lock.min
+
+# ------------------------------------------------------------------------------
+# 3. C-Extension Binaries & Python Package Build Artifacts
+# ------------------------------------------------------------------------------
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.dylib
+*.dll
+*.pyd
+*.egg-info/
+.eggs/
+dist/
+build/
+wheels/
+*.whl
+sdist/
+
+# ------------------------------------------------------------------------------
+# 4. Testing, Profiling & Type Checker Caches
+# ------------------------------------------------------------------------------
+.pytest_cache/
+**/.pytest_cache/
+.mypy_cache/
+**/.mypy_cache/
+.ruff_cache/
+.pytype/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+nosetests.xml
+
+# ------------------------------------------------------------------------------
+# 5. Operating System Generated Files
+# ------------------------------------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSSharedFileList
+.Spotlight-V100
+.Trashes
+._*
+
+# Windows
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+$RECYCLE.BIN/
+*.stackdump
+*.lnk
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+
+# ------------------------------------------------------------------------------
+# 6. IDEs, Code Editors & Tooling
+# ------------------------------------------------------------------------------
+# VS Code
+.vscode/
+*.code-workspace
+
+# PyCharm / JetBrains
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Vim / Emacs / Sublime
+*.swp
+*.swo
+*~
+*.sublime-workspace
+*.sublime-project
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
