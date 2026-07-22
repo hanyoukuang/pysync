@@ -1,10 +1,16 @@
 # pysync: Modern High-Performance Concurrency Primitives for Python 3.14t (Free-Threaded No-GIL)
 
-[中文版](https://github.com/hanyoukuang/pysync/blob/main/README_ZH.md)
+[中文版](https://github.com/hanyoukuang/pysync-nogil/blob/main/README_ZH.md)
 
 `pysync` is a high-performance modern concurrency library designed specifically for **Python 3.14t free-threaded (GIL-free)** environments.
 
 Drawing design inspiration from **Go, Rust, Java, and Akka**, `pysync` combines native Rust performance (via PyO3) with ergonomic Python APIs to deliver **million-level throughput, lock-free operations, and built-in deadlock prevention**.
+
+> [!WARNING]
+> **Toy & Experimental Sandbox Disclaimer**
+> This project is strictly an **experimental toy library / sandbox** built to explore and test the boundaries of Python 3.14t Free-Threaded (No-GIL) parallel execution.
+> **DO NOT use this in production or any critical projects!**
+> The Free-Threaded ecosystem is still actively evolving, and the future concurrency paradigm in CPython remains unknown. This repository serves purely as a laboratory for testing ideas.
 
 ---
 
