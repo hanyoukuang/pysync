@@ -4,12 +4,35 @@ build-backend = "maturin"
 
 [project]
 name = "pysync-nogil"
-version = "0.1.0"
-description = "针对 Python 3.14 自由线程的高性能现代并发原语库"
+version = "0.1.1"
+description = "High-Performance Modern Concurrency Primitives for Python 3.14+ (Free-Threaded No-GIL)"
+readme = "README.md"
 requires-python = ">=3.13"
+license = { text = "MIT" }
+keywords = ["concurrency", "free-threaded", "no-gil", "pysync", "rust", "pyo3", "lock-free", "channel", "atomic", "rwlock"]
+authors = [
+    { name = "Han Youkuang" }
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Hardware :: Symmetric Multi-processing",
+]
 dependencies = [
     "pytest>=8.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/hanyoukuang/pysync"
+Repository = "https://github.com/hanyoukuang/pysync.git"
+"Bug Tracker" = "https://github.com/hanyoukuang/pysync/issues"
+Documentation = "https://github.com/hanyoukuang/pysync#readme"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
@@ -23,4 +46,3 @@ warn_return_any = true
 warn_unused_configs = true
 check_untyped_defs = true
 disallow_untyped_defs = false
-
