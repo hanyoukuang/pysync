@@ -11,32 +11,19 @@ permissions:
 
 jobs:
   build-wheels:
-    name: Build Wheels (${{ matrix.target }} - Python 3.14t Free-Threaded)
+    name: Build Wheel (${{ matrix.os }} - Python 3.14t Free-Threaded)
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # Linux x86_64 & ARM64 (aarch64)
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-
-          # macOS Apple Silicon (ARM64) & Intel (x86_64)
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          - os: macos-13
-            target: x86_64-apple-darwin
-
-          # Windows x86_64 & ARM64 (aarch64)
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Install uv (Python Package Manager)
         uses: astral-sh/setup-uv@v3
@@ -48,17 +35,18 @@ jobs:
           uv python install 3.14t
           uv venv --python 3.14t
 
-      - name: Build Free-Threaded Wheels (cp314t) via Maturin Action
-        uses: PyO3/maturin-action@v1
-        with:
-          target: ${{ matrix.target }}
-          container: off
-          args: --release --out dist
+      - name: Install Maturin Build Tool
+        run: |
+          uv pip install maturin
+
+      - name: Build Free-Threaded Wheel via Maturin
+        run: |
+          uv run maturin build --release --out dist
 
       - name: Upload Wheels as Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}-${{ matrix.target }}
+          name: wheels-${{ matrix.os }}
           path: dist/*.whl
 
   publish:
@@ -68,16 +56,29 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
         with:
           pattern: wheels-*
           merge-multiple: true
           path: dist
 
-      - name: Publish to PyPI
-        uses: PyO3/maturin-action@v1
+      - name: Install uv (Python Package Manager)
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Set Up Python & Maturin for Publish
+        run: |
+          uv python install 3.14t
+          uv venv --python 3.14t
+          uv pip install maturin
+
+      - name: Publish Wheels to PyPI
         env:
           MATURIN_PYPI_TOKEN: ${{ secrets.MATURIN_PYPI_TOKEN }}
-        with:
-          command: upload
-          args: --non-interactive dist/*
+        run: |
+          uv run maturin upload --non-interactive dist/*
