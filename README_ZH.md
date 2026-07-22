@@ -1,10 +1,16 @@
 # pysync: 专为 Python 3.14t (自由线程 / No-GIL) 打造的高性能现代并发原语库
 
-[English Version](https://github.com/hanyoukuang/pysync/blob/main/README.md)
+[English Version](https://github.com/hanyoukuang/pysync-nogil/blob/main/README.md)
 
 `pysync` 是一个专为 **Python 3.14t 自由线程（无 GIL，free-threaded）** 环境打造的高性能并发原语库。
 
 设计上吸取了 **Go、Rust、Java 及 Akka** 等现代语言与经典并发库的 API 精髓，底层基于原生 Rust (PyO3) 构建，在无 GIL 的 Python 3.14 运行时下提供**百万级吞吐、极速无锁、防死锁保护**的并发体验。
+
+> [!WARNING]
+> **玩具与实验性声明 (Toy & Experimental Sandbox Disclaimer)**
+> 本项目纯属个人兴趣研究、验证 Python 3.14t 无 GIL 并行特性的**实验性玩具库**。
+> **请绝对不要在生产环境或任何关键项目中使用它！**
+> 目前 Python 3.14t 及整个 Free-Threaded 并发范式还在探索中，未来充满未知。本项目仅作为一个验证并发思想的“实验室”，一定潜藏着未知的 Bug 或死锁，欢迎大家一起探索。
 
 ---
 
