@@ -19,29 +19,24 @@ jobs:
         include:
           # Linux x86_64 & ARM64 (aarch64)
           - os: ubuntu-latest
-            target: x86_64
+            target: x86_64-unknown-linux-gnu
           - os: ubuntu-latest
-            target: aarch64
+            target: aarch64-unknown-linux-gnu
 
           # macOS Apple Silicon (ARM64) & Intel (x86_64)
           - os: macos-latest
-            target: aarch64
+            target: aarch64-apple-darwin
           - os: macos-13
-            target: x86_64
+            target: x86_64-apple-darwin
 
           # Windows x86_64 & ARM64 (aarch64)
           - os: windows-latest
-            target: x86_64
+            target: x86_64-pc-windows-msvc
           - os: windows-latest
-            target: aarch64
+            target: aarch64-pc-windows-msvc
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
 
       - name: Install uv (Python Package Manager)
         uses: astral-sh/setup-uv@v3
@@ -53,11 +48,7 @@ jobs:
           uv python install 3.14t
           uv venv --python 3.14t
 
-      - name: Install Maturin Build Tool
-        run: |
-          uv pip install maturin
-
-      - name: Build Free-Threaded Wheels (cp314t) via Maturin
+      - name: Build Free-Threaded Wheels (cp314t) via Maturin Action
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
