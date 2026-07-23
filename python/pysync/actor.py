@@ -151,17 +151,25 @@ class Actor:
                 except ValueError:  # Mailbox closed
                     break
         finally:
-            # Drain any remaining messages left in mailbox and set exception on their futures
+            # Close mailbox first so any concurrent/subsequent send() fails fast with ValueError,
+            # then drain all remaining messages in the buffer to set exception on their futures.
             try:
                 mailbox = object.__getattribute__(self, '_mailbox')
+                try:
+                    mailbox.close()
+                except Exception:
+                    pass
                 while True:
                     try:
-                        msg = mailbox.recv_timeout(0.0)
+                        msg = mailbox.recv()
                         if msg is None:
                             continue
                         _, _, _, future = msg
                         if future is not None and not future.done():
                             future.set_exception(RuntimeError("Actor is stopped"))
+                    except ValueError:
+                        # Channel is closed and empty
+                        break
                     except Exception:
                         break
             except Exception:
@@ -201,14 +209,6 @@ class Actor:
                         return future
 
                     object.__getattribute__(self, '_mailbox').send((name, (), {}, future))
-
-                    if object.__getattribute__(self, '_stopped'):
-                        try:
-                            thread = object.__getattribute__(self, '_thread')
-                            if thread is not None and not thread.is_alive() and not future.done():
-                                future.set_exception(RuntimeError("Actor is stopped"))
-                        except AttributeError:
-                            pass
                 except (ValueError, RuntimeError) as err:
                     if not future.done():
                         future.set_exception(RuntimeError(f"Actor is stopped: {err}"))
@@ -230,14 +230,6 @@ class Actor:
                         return future
 
                     object.__getattribute__(self, '_mailbox').send((name, args, kwargs, future))
-
-                    if object.__getattribute__(self, '_stopped'):
-                        try:
-                            thread = object.__getattribute__(self, '_thread')
-                            if thread is not None and not thread.is_alive() and not future.done():
-                                future.set_exception(RuntimeError("Actor is stopped"))
-                        except AttributeError:
-                            pass
                 except (ValueError, RuntimeError) as err:
                     if not future.done():
                         future.set_exception(RuntimeError(f"Actor is stopped: {err}"))
