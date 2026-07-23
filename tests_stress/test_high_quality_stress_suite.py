@@ -181,12 +181,9 @@ def test_128_readers_rwlock_massive_concurrency():
     def reader_task():
         try:
             while not stop_event.is_set():
-                lock.acquire_read()
-                try:
+                with lock.read():
                     _ = config_cache["data"]
                     reader_reads.increment()
-                finally:
-                    lock.release_read()
                 time.sleep(0.0001)
         except Exception as e:
             errors.append(e)
@@ -194,13 +191,10 @@ def test_128_readers_rwlock_massive_concurrency():
     def writer_task(wid):
         try:
             for i in range(50):
-                lock.acquire_write()
-                try:
+                with lock.write():
                     config_cache["version"] += 1
                     config_cache["data"] = f"payload_v{config_cache['version']}"
                     writer_writes.increment()
-                finally:
-                    lock.release_write()
                 time.sleep(0.005)
         except Exception as e:
             errors.append(e)

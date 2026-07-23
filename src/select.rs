@@ -58,16 +58,19 @@ pub fn select(
     // Step 2: Register the channels and close signal receivers
     let mut sel = Select::new();
     let mut close_op_map = HashMap::new();
+    let mut main_op_map = HashMap::new();
 
     for (op_idx, op) in parsed_ops.iter().enumerate() {
         match op {
             OpType::Recv(rx, close_rx) => {
-                sel.recv(rx);
+                let m_idx = sel.recv(rx);
+                main_op_map.insert(m_idx, op_idx);
                 let c_idx = sel.recv(close_rx);
                 close_op_map.insert(c_idx, (op_idx, false));
             }
             OpType::Send(tx, _, close_rx) => {
-                sel.send(tx);
+                let m_idx = sel.send(tx);
+                main_op_map.insert(m_idx, op_idx);
                 let c_idx = sel.recv(close_rx);
                 close_op_map.insert(c_idx, (op_idx, true));
             }
@@ -109,7 +112,10 @@ pub fn select(
             }
         }
 
-        let op_idx = select_idx / 2;
+        let &op_idx = match main_op_map.get(&select_idx) {
+            Some(idx) => idx,
+            None => return SelectResult::Timeout,
+        };
 
         match &parsed_ops[op_idx] {
             OpType::Recv(rx, _) => {

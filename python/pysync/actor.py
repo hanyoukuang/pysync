@@ -105,17 +105,15 @@ class Actor:
         return False
 
     def _ensure_thread_started(self):
-        """Helper to lazily start the background worker thread using double-checked locking."""
-        if object.__getattribute__(self, '_thread') is not None:
-            return
-
+        """Helper to lazily start the background worker thread safely under No-GIL Python."""
         with object.__getattribute__(self, '_lock'):
             if object.__getattribute__(self, '_thread') is not None:
                 return
 
             thread = threading.Thread(target=self._run_loop, name=f"Actor-{type(self).__name__}")
             object.__setattr__(self, '_thread', thread)
-            thread.start()
+
+        thread.start()
 
     def _run_loop(self):
         try:

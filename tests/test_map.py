@@ -377,3 +377,163 @@ def test_concurrent_map_items_snapshot_consistency():
 
     assert not errors, f"并发 items() 读取出错: {errors}"
 
+
+def test_map_hash_called_exactly_once_per_operation():
+    """Verify __hash__ is called exactly once per operation."""
+    class HashCounterKey:
+        def __init__(self, val):
+            self.val = val
+            self.hash_calls = 0
+
+        def __hash__(self):
+            self.hash_calls += 1
+            return hash(self.val)
+
+        def __eq__(self, other):
+            if isinstance(other, HashCounterKey):
+                return self.val == other.val
+            return False
+
+    m = ConcurrentMap(shard_count=1)
+
+    k1 = HashCounterKey(1)
+    m.set(k1, "v1")
+    assert k1.hash_calls == 1
+
+    k2 = HashCounterKey(2)
+    m.set(k2, "v2")
+    k2.hash_calls = 0
+    m.get(k2)
+    assert k2.hash_calls == 1
+
+    k3 = HashCounterKey(3)
+    m.set(k3, "v3")
+    k3.hash_calls = 0
+    m.contains_key(k3)
+    assert k3.hash_calls == 1
+
+    k4 = HashCounterKey(4)
+    m.set(k4, "v4")
+    k4.hash_calls = 0
+    m.delete(k4)
+    assert k4.hash_calls == 1
+
+    k5 = HashCounterKey(5)
+    m.set(k5, "v5")
+    k5.hash_calls = 0
+    m.get_val(k5)
+    assert k5.hash_calls == 1
+
+    k6 = HashCounterKey(6)
+    m.set(k6, "v6")
+    k6.hash_calls = 0
+    m.pop_val(k6)
+    assert k6.hash_calls == 1
+
+    k7 = HashCounterKey(7)
+    k7.hash_calls = 0
+    m.get_or_insert(k7, "default")
+    assert k7.hash_calls == 1
+
+
+def test_map_set_toctou_duplicate_entry():
+    """Verify set() does not create duplicate entries under concurrency."""
+    class CollidingKey:
+        def __init__(self, value):
+            self.value = value
+
+        def __hash__(self):
+            return 42
+
+        def __eq__(self, other):
+            if isinstance(other, CollidingKey):
+                return self.value == other.value
+            return False
+
+    m = ConcurrentMap(shard_count=1)
+    errors = []
+    barrier = threading.Barrier(3, timeout=5.0)
+    stop = threading.Event()
+    duplicate_found = threading.Event()
+
+    k0 = CollidingKey(0)
+    m.set(k0, "initial")
+
+    def writer_A():
+        barrier.wait()
+        count = 0
+        while not stop.is_set() and count < 3000:
+            ka = CollidingKey(100)
+            m.set(ka, "A")
+            m.delete(ka)
+            count += 1
+
+    def writer_B():
+        barrier.wait()
+        count = 0
+        while not stop.is_set() and count < 3000:
+            kb = CollidingKey(100)
+            m.set(kb, "B")
+            count += 1
+
+    t_a = threading.Thread(target=writer_A)
+    t_b = threading.Thread(target=writer_B)
+    t_a.start()
+    t_b.start()
+
+    barrier.wait()
+    for _ in range(150):
+        time.sleep(0.005)
+        items = m.items()
+        vals_for_100 = [v for k, v in items if isinstance(k, CollidingKey) and k.value == 100]
+        if len(vals_for_100) > 1:
+            duplicate_found.set()
+            errors.append(f"Duplicate entries found: {vals_for_100}")
+            break
+
+    stop.set()
+    t_a.join(timeout=3.0)
+    t_b.join(timeout=3.0)
+
+    assert not duplicate_found.is_set(), f"TOCTOU duplicate entry error: {errors}"
+
+
+def test_map_len_is_approximate_under_concurrency():
+    """Verify len() provides weak consistency under concurrent modifications."""
+    m = ConcurrentMap(shard_count=8)
+    initial_count = 200
+    for i in range(initial_count):
+        m.set(f"key_{i}", i)
+
+    stop = threading.Event()
+    len_values = []
+    lock = threading.Lock()
+
+    def modifier():
+        counter = initial_count
+        while not stop.is_set():
+            new_key = f"key_{counter}"
+            old_key = f"key_{counter - initial_count}"
+            m.set(new_key, counter)
+            m.delete(old_key)
+            counter += 1
+
+    def reader():
+        while not stop.is_set():
+            l = m.len()
+            with lock:
+                len_values.append(l)
+
+    t_mod = threading.Thread(target=modifier)
+    t_read = threading.Thread(target=reader)
+    t_mod.start()
+    t_read.start()
+    time.sleep(0.3)
+    stop.set()
+    t_mod.join(timeout=2.0)
+    t_read.join(timeout=2.0)
+
+    unique_lens = set(len_values)
+    assert len(unique_lens) > 1
+
+

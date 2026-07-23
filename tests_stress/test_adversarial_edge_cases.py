@@ -177,15 +177,12 @@ def test_atomic_integer_invalid_init_type():
 # ==============================================================================
 
 def test_rwlock_release_unheld_lock_raises_error():
-    """边界 5.1: 未获取锁时调用 release_read/release_write 不得使程序崩溃。"""
+    """边界 5.1: 裸 lock/unlock API 已安全移除，强制使用 RAII 上下文管理器。"""
     lock = RwLock()
-    # 释放未持有的锁
-    try:
-        lock.release_read()
-    except (RuntimeError, ValueError):
-        pass  # 抛出异常是安全的
+    assert not hasattr(lock, "release_read")
+    assert not hasattr(lock, "release_write")
 
-    try:
-        lock.release_write()
-    except (RuntimeError, ValueError):
+    with lock.read():
+        pass
+    with lock.write():
         pass

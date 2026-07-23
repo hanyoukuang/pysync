@@ -127,28 +127,22 @@ actor.stop()
 ### 4. Zero-Allocation Reader-Writer Lock (`RwLock`)
 > **Inspired by: Rust `parking_lot::RwLock` / Java `ReentrantReadWriteLock`**
 
-Allows multiple concurrent readers while writers hold exclusive access. Features non-GIL releasing fast path and TLS re-entrancy support:
+Allows multiple concurrent readers while writers hold exclusive access. Features non-GIL releasing fast path and TLS re-entrancy support via Pythonic context managers (Safe RAII):
 
 ```python
 from pysync import RwLock
 
 lock = RwLock()
 
-# Pythonic context manager API (Safe RAII)
+# Shared read lock
 with lock.read():
     # Shared read logic...
     pass
 
+# Exclusive write lock
 with lock.write():
     # Exclusive write logic...
     pass
-
-# Zero-allocation direct lock methods (Maximum speed)
-lock.acquire_read()
-try:
-    pass
-finally:
-    lock.release_read()
 ```
 
 ---
@@ -203,8 +197,11 @@ with ThreadGroup() as tg:
 # Compile Rust PyO3 extension
 maturin develop --release
 
-# Run component unit test suite (388 tests)
+# Routine local development (fast unit tests)
 pytest tests/
+
+# Mandatory before submitting a PR (full unit + stress tests)
+pytest tests/ tests_stress/
 
 # Run performance benchmark suite
 python tests/test_perf.py

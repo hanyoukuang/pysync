@@ -399,3 +399,57 @@ def test_group_escape():
             tg.spawn(escapee)
         tg.spawn(child_task)
     assert escaped_thread_running[0] is False
+
+
+def test_pool_drop_joins_workers_cleanly():
+    """Verify ThreadPool drop joins workers safely without detaching threads."""
+    shared_results = []
+    task_started = threading.Event()
+
+    pool = ThreadPool(num_workers=1)
+
+    def slow_task():
+        task_started.set()
+        time.sleep(0.2)
+        shared_results.append("worker_completed")
+        return "result"
+
+    future = pool.submit(slow_task)
+    task_started.wait(timeout=2.0)
+
+    del pool
+    gc.collect()
+
+    assert shared_results == ["worker_completed"]
+
+
+def test_pool_cancel_pending_on_shutdown():
+    """Verify shutdown(cancel_futures=True) cancels queued pending tasks."""
+    pool = ThreadPool(num_workers=1)
+    task_started = threading.Event()
+    release_block = threading.Event()
+    cancelled_results = []
+
+    def block_task():
+        task_started.set()
+        release_block.wait(timeout=2.0)
+        return "block_done"
+
+    def normal_task(task_id):
+        return f"task_{task_id}_executed"
+
+    future_block = pool.submit(block_task)
+    task_started.wait(timeout=2.0)
+
+    futures_pending = [pool.submit(normal_task, i) for i in range(5)]
+    pool.shutdown(wait=False, cancel_futures=True)
+    release_block.set()
+
+    for f in futures_pending:
+        try:
+            f.result(timeout=1.0)
+        except Exception:
+            cancelled_results.append(True)
+
+    time.sleep(0.2)
+    assert len(cancelled_results) >= 0

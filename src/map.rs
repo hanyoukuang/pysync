@@ -3,13 +3,6 @@ use pyo3::{Py, PyAny};
 use std::collections::HashMap;
 use parking_lot::Mutex;
 
-/// Helper function to check if a Python object is hashable.
-/// If not, it raises a Python `TypeError` directly at the API boundary.
-fn check_hashable(_py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<()> {
-    key.hash()?;
-    Ok(())
-}
-
 /// A highly concurrent, thread-safe hash map with dynamically configurable shard count.
 /// Each shard is protected by a Mutex. Python callbacks (like `__eq__` and `__hash__`)
 /// are executed entirely OUTSIDE the shard locks, preventing any lock-ordering
@@ -54,7 +47,6 @@ impl ConcurrentMap {
 
     /// Retrieve the value associated with the key.
     fn get(&self, py: Python<'_>, key: Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
-        check_hashable(py, &key)?;
         let h = key.hash()? as u64;
         let idx = (h as usize) % self.shards.len();
 
@@ -81,7 +73,6 @@ impl ConcurrentMap {
 
     /// Retrieve the value associated with the key as a tuple (found, value).
     fn get_val(&self, py: Python<'_>, key: Bound<'_, PyAny>) -> PyResult<(bool, Py<PyAny>)> {
-        check_hashable(py, &key)?;
         let h = key.hash()? as u64;
         let idx = (h as usize) % self.shards.len();
 
@@ -106,7 +97,6 @@ impl ConcurrentMap {
 
     /// Atomically get the existing value for key, or insert default and return default if absent.
     fn get_or_insert(&self, py: Python<'_>, key: Bound<'_, PyAny>, default: Py<PyAny>) -> PyResult<Py<PyAny>> {
-        check_hashable(py, &key)?;
         let h = key.hash()? as u64;
         let idx = (h as usize) % self.shards.len();
         let pykey = key.clone().unbind();
@@ -166,87 +156,170 @@ impl ConcurrentMap {
 
     /// Set the value for the key.
     fn set(&self, py: Python<'_>, key: Bound<'_, PyAny>, value: Py<PyAny>) -> PyResult<()> {
-        check_hashable(py, &key)?;
         let h = key.hash()? as u64;
         let idx = (h as usize) % self.shards.len();
         let pykey = key.clone().unbind();
 
-        // 1. Retrieve and clone candidate keys ONLY (avoid cloning values)
-        let candidate_keys = {
-            let shard = self.shards[idx].lock();
-            shard.get(&h).map(|list| {
-                list.iter()
-                    .map(|(k, _)| k.clone_ref(py))
-                    .collect::<Vec<_>>()
-            })
-        };
-
-        let mut matching_key = None;
-        if let Some(keys) = &candidate_keys {
-            // 2. Perform key comparisons outside the lock
-            for k in keys {
-                if k.bind(py).eq(&key)? {
-                    matching_key = Some(k.clone_ref(py));
-                    break;
+        // Fast-path: empty bucket or pointer identity match under lock (zero heap allocation)
+        {
+            let mut shard = self.shards[idx].lock();
+            match shard.entry(h) {
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(vec![(pykey, value)]);
+                    return Ok(());
+                }
+                std::collections::hash_map::Entry::Occupied(mut o) => {
+                    let list = o.get_mut();
+                    if list.is_empty() {
+                        list.push((pykey, value));
+                        return Ok(());
+                    }
+                    if let Some(pos) = list.iter().position(|(k, _)| k.is(&pykey)) {
+                        list[pos].1 = value;
+                        return Ok(());
+                    }
                 }
             }
         }
 
-        // 3. Re-lock and update or insert
-        let mut shard = self.shards[idx].lock();
-        let list = shard.entry(h).or_insert_with(Vec::new);
+        // Slow-path for hash collision with distinct PyObjects: retry loop
+        let mut checked_keys: Vec<Py<PyAny>> = Vec::new();
 
-        if let Some(m_key) = matching_key {
-            // Find and update the existing key using pointer equality
-            if let Some(pos) = list.iter().position(|(k, _)| k.is(&m_key)) {
+        loop {
+            // 1. Collect candidate keys under lock that haven't been checked yet
+            let new_candidates = {
+                let shard = self.shards[idx].lock();
+                if let Some(list) = shard.get(&h) {
+                    list.iter()
+                        .filter_map(|(k, _)| {
+                            if checked_keys.iter().any(|ck| ck.is(k)) {
+                                None
+                            } else {
+                                Some(k.clone_ref(py))
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                }
+            };
+
+            // 2. Perform key comparisons outside the lock
+            for k in new_candidates {
+                let is_match = k.bind(py).eq(&key)?;
+                checked_keys.push(k.clone_ref(py));
+                if is_match {
+                    let mut shard = self.shards[idx].lock();
+                    if let Some(list) = shard.get_mut(&h) {
+                        if let Some(pos) = list.iter().position(|(candidate, _)| candidate.is(&k)) {
+                            list[pos].1 = value;
+                            return Ok(());
+                        }
+                    }
+                    // k matched __eq__ outside lock, but pointer identity failed after re-locking
+                    // because another thread replaced or removed the key object while lock was released.
+                    // k is pushed to checked_keys above so it is explicitly marked as evaluated.
+                    break;
+                }
+            }
+
+            // 3. Re-lock and update or insert if no unchecked candidate remains
+            let mut shard = self.shards[idx].lock();
+            let list = shard.entry(h).or_insert_with(Vec::new);
+
+            let has_unbound_candidate = list.iter().any(|(k, _)| !checked_keys.iter().any(|ck| ck.is(k)));
+            if has_unbound_candidate {
+                continue;
+            }
+
+            if let Some(pos) = list.iter().position(|(k, _)| k.is(&pykey)) {
                 list[pos].1 = value;
                 return Ok(());
             }
-        }
 
-        // Check if key exists in list via pointer identity without executing Python __eq__ under lock
-        for (pos, (k, _)) in list.iter().enumerate() {
-            if k.is(&pykey) {
-                list[pos].1 = value;
-                return Ok(());
-            }
+            list.push((pykey, value));
+            return Ok(());
         }
-
-        list.push((pykey, value));
-        Ok(())
     }
 
     /// Delete the key from the map. Returns True if the key was present, otherwise False.
     fn delete(&self, py: Python<'_>, key: Bound<'_, PyAny>) -> PyResult<bool> {
-        check_hashable(py, &key)?;
         let h = key.hash()? as u64;
         let idx = (h as usize) % self.shards.len();
+        let pykey = key.clone().unbind();
 
-        // 1. Retrieve and clone candidate keys ONLY (avoid cloning values)
-        let candidate_keys = {
-            let shard = self.shards[idx].lock();
-            shard.get(&h).map(|list| {
-                list.iter()
-                    .map(|(k, _)| k.clone_ref(py))
-                    .collect::<Vec<_>>()
-            })
-        };
+        // Fast-path: empty bucket or pointer identity match under lock (zero heap allocation)
+        {
+            let mut shard = self.shards[idx].lock();
+            if let Some(list) = shard.get_mut(&h) {
+                if list.is_empty() {
+                    return Ok(false);
+                }
+                if let Some(pos) = list.iter().position(|(k, _)| k.is(&pykey)) {
+                    list.remove(pos);
+                    if list.is_empty() {
+                        shard.remove(&h);
+                    }
+                    return Ok(true);
+                }
+            } else {
+                return Ok(false);
+            }
+        }
 
-        let mut matching_key = None;
-        if let Some(keys) = &candidate_keys {
+        // Slow-path for hash collision with distinct PyObjects: retry loop
+        let mut checked_keys: Vec<Py<PyAny>> = Vec::new();
+
+        loop {
+            // 1. Collect candidate keys under lock that haven't been checked yet
+            let new_candidates = {
+                let shard = self.shards[idx].lock();
+                if let Some(list) = shard.get(&h) {
+                    list.iter()
+                        .filter_map(|(k, _)| {
+                            if checked_keys.iter().any(|ck| ck.is(k)) {
+                                None
+                            } else {
+                                Some(k.clone_ref(py))
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                }
+            };
+
             // 2. Perform key comparisons outside the lock
-            for k in keys {
-                if k.bind(py).eq(&key)? {
-                    matching_key = Some(k.clone_ref(py));
+            for k in new_candidates {
+                let is_match = k.bind(py).eq(&key)?;
+                checked_keys.push(k.clone_ref(py));
+                if is_match {
+                    let mut shard = self.shards[idx].lock();
+                    if let Some(list) = shard.get_mut(&h) {
+                        if let Some(pos) = list.iter().position(|(candidate, _)| candidate.is(&k)) {
+                            list.remove(pos);
+                            if list.is_empty() {
+                                shard.remove(&h);
+                            }
+                            return Ok(true);
+                        }
+                    }
+                    // k matched __eq__ outside lock, but pointer identity failed after re-locking
+                    // because another thread replaced or removed the key object while lock was released.
+                    // k is pushed to checked_keys above so it is explicitly marked as evaluated.
                     break;
                 }
             }
-        }
 
-        let mut shard = self.shards[idx].lock();
-        if let Some(list) = shard.get_mut(&h) {
-            if let Some(m_key) = matching_key {
-                if let Some(pos) = list.iter().position(|(k, _)| k.is(&m_key)) {
+            // 3. Re-lock shard and return false if no unchecked candidate remains
+            let mut shard = self.shards[idx].lock();
+            if let Some(list) = shard.get_mut(&h) {
+                let has_unbound_candidate = list.iter().any(|(k, _)| !checked_keys.iter().any(|ck| ck.is(k)));
+                if has_unbound_candidate {
+                    continue;
+                }
+
+                if let Some(pos) = list.iter().position(|(k, _)| k.is(&pykey)) {
                     list.remove(pos);
                     if list.is_empty() {
                         shard.remove(&h);
@@ -254,52 +327,90 @@ impl ConcurrentMap {
                     return Ok(true);
                 }
             }
-            // Fallback check using pointer identity without executing Python __eq__ under lock
-            for pos in 0..list.len() {
-                if list[pos].0.is(&key) {
-                    list.remove(pos);
-                    if list.is_empty() {
-                        shard.remove(&h);
-                    }
-                    return Ok(true);
-                }
-            }
+
+            return Ok(false);
         }
-        Ok(false)
     }
 
     /// Atomically remove and return the key's value.
     /// Returns `(true, value)` if found, or `(false, None)` if absent.
     fn pop_val(&self, py: Python<'_>, key: Bound<'_, PyAny>) -> PyResult<(bool, Py<PyAny>)> {
-        check_hashable(py, &key)?;
         let h = key.hash()? as u64;
         let idx = (h as usize) % self.shards.len();
+        let pykey = key.clone().unbind();
 
-        // 1. Retrieve and clone candidate keys ONLY (avoid cloning values)
-        let candidate_keys = {
-            let shard = self.shards[idx].lock();
-            shard.get(&h).map(|list| {
-                list.iter()
-                    .map(|(k, _)| k.clone_ref(py))
-                    .collect::<Vec<_>>()
-            })
-        };
+        // Fast-path: empty bucket or pointer identity match under lock (zero heap allocation)
+        {
+            let mut shard = self.shards[idx].lock();
+            if let Some(list) = shard.get_mut(&h) {
+                if list.is_empty() {
+                    return Ok((false, py.None()));
+                }
+                if let Some(pos) = list.iter().position(|(k, _)| k.is(&pykey)) {
+                    let (_, val) = list.remove(pos);
+                    if list.is_empty() {
+                        shard.remove(&h);
+                    }
+                    return Ok((true, val));
+                }
+            } else {
+                return Ok((false, py.None()));
+            }
+        }
 
-        let mut matching_key = None;
-        if let Some(keys) = &candidate_keys {
+        // Slow-path for hash collision with distinct PyObjects: retry loop
+        let mut checked_keys: Vec<Py<PyAny>> = Vec::new();
+
+        loop {
+            // 1. Collect candidate keys under lock that haven't been checked yet
+            let new_candidates = {
+                let shard = self.shards[idx].lock();
+                if let Some(list) = shard.get(&h) {
+                    list.iter()
+                        .filter_map(|(k, _)| {
+                            if checked_keys.iter().any(|ck| ck.is(k)) {
+                                None
+                            } else {
+                                Some(k.clone_ref(py))
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                }
+            };
+
             // 2. Perform key comparisons outside the lock
-            for k in keys {
-                if k.bind(py).eq(&key)? {
-                    matching_key = Some(k.clone_ref(py));
+            for k in new_candidates {
+                let is_match = k.bind(py).eq(&key)?;
+                checked_keys.push(k.clone_ref(py));
+                if is_match {
+                    let mut shard = self.shards[idx].lock();
+                    if let Some(list) = shard.get_mut(&h) {
+                        if let Some(pos) = list.iter().position(|(candidate, _)| candidate.is(&k)) {
+                            let (_, val) = list.remove(pos);
+                            if list.is_empty() {
+                                shard.remove(&h);
+                            }
+                            return Ok((true, val));
+                        }
+                    }
+                    // k matched __eq__ outside lock, but pointer identity failed after re-locking
+                    // because another thread replaced or removed the key object while lock was released.
+                    // k is pushed to checked_keys above so it is explicitly marked as evaluated.
                     break;
                 }
             }
-        }
 
-        let mut shard = self.shards[idx].lock();
-        if let Some(list) = shard.get_mut(&h) {
-            if let Some(m_key) = matching_key {
-                if let Some(pos) = list.iter().position(|(k, _)| k.is(&m_key)) {
+            // 3. Re-lock shard and return (false, None) if no unchecked candidate remains
+            let mut shard = self.shards[idx].lock();
+            if let Some(list) = shard.get_mut(&h) {
+                let has_unbound_candidate = list.iter().any(|(k, _)| !checked_keys.iter().any(|ck| ck.is(k)));
+                if has_unbound_candidate {
+                    continue;
+                }
+
+                if let Some(pos) = list.iter().position(|(k, _)| k.is(&pykey)) {
                     let (_, val) = list.remove(pos);
                     if list.is_empty() {
                         shard.remove(&h);
@@ -307,23 +418,13 @@ impl ConcurrentMap {
                     return Ok((true, val));
                 }
             }
-            // Fallback check using pointer identity without executing Python __eq__ under lock
-            for pos in 0..list.len() {
-                if list[pos].0.is(&key) {
-                    let (_, val) = list.remove(pos);
-                    if list.is_empty() {
-                        shard.remove(&h);
-                    }
-                    return Ok((true, val));
-                }
-            }
+
+            return Ok((false, py.None()));
         }
-        Ok((false, py.None()))
     }
 
     /// Check if the key exists in the map.
     fn contains_key(&self, py: Python<'_>, key: Bound<'_, PyAny>) -> PyResult<bool> {
-        check_hashable(py, &key)?;
         let h = key.hash()? as u64;
         let idx = (h as usize) % self.shards.len();
 
@@ -348,7 +449,9 @@ impl ConcurrentMap {
         Ok(false)
     }
 
-    /// Return the number of elements in the map.
+    /// Return the total number of elements across all shards.
+    /// Note: Under concurrent modifications, this represents a weakly-consistent
+    /// snapshot and may return an approximate value rather than a global atomic freeze.
     fn len(&self) -> usize {
         let mut total = 0;
         for shard in &self.shards {
@@ -372,6 +475,7 @@ impl ConcurrentMap {
     }
 
     /// Retrieve all keys in the map.
+    /// Note: Returns a weakly-consistent snapshot collected shard-by-shard.
     fn keys(&self, py: Python<'_>) -> Vec<Py<PyAny>> {
         let mut all_keys = Vec::new();
         for shard in &self.shards {
@@ -386,6 +490,7 @@ impl ConcurrentMap {
     }
 
     /// Retrieve all values in the map.
+    /// Note: Returns a weakly-consistent snapshot collected shard-by-shard.
     fn values(&self, py: Python<'_>) -> Vec<Py<PyAny>> {
         let mut all_values = Vec::new();
         for shard in &self.shards {
@@ -400,6 +505,7 @@ impl ConcurrentMap {
     }
 
     /// Retrieve all key-value tuples in the map.
+    /// Note: Returns a weakly-consistent snapshot collected shard-by-shard.
     fn items(&self, py: Python<'_>) -> Vec<(Py<PyAny>, Py<PyAny>)> {
         let mut all_items = Vec::new();
         for shard in &self.shards {

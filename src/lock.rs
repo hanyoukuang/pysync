@@ -2,31 +2,22 @@ use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
 use std::sync::Arc;
 use std::cell::RefCell;
-use parking_lot::lock_api::RawRwLock as _;
 
 thread_local! {
     static READ_DEPTH: RefCell<usize> = RefCell::new(0);
 }
 
-/// A simple FFI escape hatch to bypass Rust's Send/Sync constraints for PyO3.
-///
-/// # SAFETY
-/// `parking_lot::ArcRwLockReadGuard` and `ArcRwLockWriteGuard` contain raw pointers
-/// which are marked `!Send`. `UnsafeSend` wraps them so they can be passed through
-/// PyO3's `py.detach(|| ...)` GIL-releasing closures.
-///
-/// **Safety invariant**: `UnsafeSend` is strictly restricted to internal scope within
-/// context manager `__enter__` calls where the guard is constructed inside `py.detach`
-/// on the caller's OS thread and immediately moved back to `RwLockReadGuard` / `RwLockWriteGuard`.
-/// It must never be transferred across arbitrary worker threads.
-struct UnsafeSend<T>(T);
-unsafe impl<T> Send for UnsafeSend<T> {}
-unsafe impl<T> Sync for UnsafeSend<T> {}
+/// FFI wrapper to satisfy PyO3 `py.detach`'s `Ungil` (`Send`) bound for `parking_lot` lock guards.
+/// `lock_api` guards contain `*mut ()` (`!Send`), but constructed guards are unwrapped immediately
+/// on the same thread after `py.detach` returns.
+struct UnsafeSendGuard<T>(T);
+unsafe impl<T> Send for UnsafeSendGuard<T> {}
+unsafe impl<T> Sync for UnsafeSendGuard<T> {}
 
 /// A native Reader-Writer lock based on parking_lot::RwLock.
 /// Allows multiple concurrent readers or a single exclusive writer.
+/// Context-manager guards (`with lock.read():` / `with lock.write():`) ensure exception-safe RAII scoping.
 #[pyclass]
-#[repr(align(64))]
 pub struct RwLock {
     lock: Arc<parking_lot::RwLock<()>>,
 }
@@ -71,52 +62,6 @@ impl RwLock {
             guard: None,
         }
     }
-
-    /// Direct read lock acquisition (zero Python object allocation).
-    fn acquire_read(&self, py: Python<'_>) {
-        let lock = self.lock.clone();
-        py.detach(|| {
-            unsafe {
-                lock.raw().lock_shared();
-            }
-        });
-    }
-
-    /// Direct read lock release.
-    fn release_read(&self) -> PyResult<()> {
-        unsafe {
-            self.lock.raw().unlock_shared();
-        }
-        Ok(())
-    }
-
-    /// Try direct read lock acquisition without blocking.
-    fn try_acquire_read(&self) -> bool {
-        unsafe { self.lock.raw().try_lock_shared() }
-    }
-
-    /// Direct write lock acquisition (zero Python object allocation).
-    fn acquire_write(&self, py: Python<'_>) {
-        let lock = self.lock.clone();
-        py.detach(|| {
-            unsafe {
-                lock.raw().lock_exclusive();
-            }
-        });
-    }
-
-    /// Direct write lock release.
-    fn release_write(&self) -> PyResult<()> {
-        unsafe {
-            self.lock.raw().unlock_exclusive();
-        }
-        Ok(())
-    }
-
-    /// Try direct write lock acquisition without blocking.
-    fn try_acquire_write(&self) -> bool {
-        unsafe { self.lock.raw().try_lock_exclusive() }
-    }
 }
 
 #[pymethods]
@@ -157,9 +102,9 @@ impl RwLockReadGuard {
 
         let guard_wrapper = s.py().detach(|| {
             if is_reentrant {
-                UnsafeSend(lock.read_arc_recursive())
+                UnsafeSendGuard(lock.read_arc_recursive())
             } else {
-                UnsafeSend(lock.read_arc())
+                UnsafeSendGuard(lock.read_arc())
             }
         });
 
@@ -211,9 +156,7 @@ impl RwLockWriteGuard {
                 let s_ref = s.borrow();
                 s_ref.lock.clone()
             };
-            let guard_wrapper = s.py().detach(|| {
-                UnsafeSend(lock.write_arc())
-            });
+            let guard_wrapper = s.py().detach(|| UnsafeSendGuard(lock.write_arc()));
             let mut s_mut = s.borrow_mut();
             s_mut.guard = Some(guard_wrapper.0);
         }

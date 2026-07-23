@@ -205,17 +205,12 @@ impl Drop for ThreadPool {
             *active = false;
         }
 
-        // Drops the sender, causing receivers to exit once queue is drained
+        // Drops the sender, causing worker receivers to exit once work queue is empty.
         self.sender = None;
 
-        // Take workers and spawn a detached thread to join them.
-        let workers = std::mem::take(&mut self.workers);
-        if !workers.is_empty() {
-            std::thread::spawn(move || {
-                for handle in workers {
-                    let _ = handle.join();
-                }
-            });
+        // Join worker threads to ensure clean shutdown without detaching threads
+        for handle in self.workers.drain(..) {
+            let _ = handle.join();
         }
     }
 }

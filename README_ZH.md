@@ -127,28 +127,22 @@ actor.stop()
 ### 4. 零内存分配读写锁 (`RwLock`)
 > **灵感来源：Rust `parking_lot::RwLock` / Java `ReentrantReadWriteLock`**
 
-允许多个读线程同时并行读取，写者持有独占写锁。支持无 GIL 释放快速路径与 TLS 线程级可重入：
+允许多个读线程同时并行读取，写者持有独占写锁。支持无 GIL 释放快速路径与 TLS 线程级可重入，基于上下文管理器（安全 RAII 规范）：
 
 ```python
 from pysync import RwLock
 
 lock = RwLock()
 
-# Pythonic 上下文管理器 API (安全 RAII)
+# 共享读锁
 with lock.read():
     # 共享读逻辑...
     pass
 
+# 独占写锁
 with lock.write():
     # 独占写逻辑...
     pass
-
-# 零分配直加锁接口 (极致原生速度)
-lock.acquire_read()
-try:
-    pass
-finally:
-    lock.release_read()
 ```
 
 ---
@@ -203,8 +197,11 @@ with ThreadGroup() as tg:
 # 编译 Rust PyO3 扩展
 maturin develop --release
 
-# 运行组件单元测试套件 (388 测试)
+# 日常本地开发（快速单元测试）
 pytest tests/
+
+# 提交 PR 前必须执行（单元测试 + 全量高压压力测试）
+pytest tests/ tests_stress/
 
 # 运行性能基准测试
 python tests/test_perf.py
