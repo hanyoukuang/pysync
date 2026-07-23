@@ -68,10 +68,26 @@ class Actor:
         if '__init__' in cls.__dict__:
             cls.__init__ = _wrap_init(cls.__init__)  # type: ignore[method-assign]
 
-    def __init__(self, mailbox_capacity=None):
+    def __init__(self, mailbox_capacity=256):
         self._mailbox = Channel(capacity=mailbox_capacity)
         self._thread = None
         self._lock = threading.Lock()
+
+    def tell(self, method_name: str, *args, **kwargs) -> None:
+        """
+        Send a non-blocking fire-and-forget message to the Actor without returning a Future.
+        
+        The method will be executed sequentially on the Actor worker thread. Any unhandled
+        exceptions will be routed to the `on_error()` supervision hook.
+        """
+        try:
+            if object.__getattribute__(self, '_stopped'):
+                raise RuntimeError("Actor is stopped")
+        except AttributeError:
+            pass
+
+        self._ensure_thread_started()
+        object.__getattribute__(self, '_mailbox').send((method_name, args, kwargs, None))
 
     def on_start(self):
         """Lifecycle hook called on the worker thread when the Actor starts."""
@@ -119,34 +135,45 @@ class Actor:
                     msg = self._mailbox.recv()
                     if msg is None:  # Shutdown sentinel
                         break
-                    method_name, args, kwargs, future = msg
-                    try:
-                        # Bypass the interceptor to get the actual method or property
-                        method = object.__getattribute__(self, method_name)
-                        if callable(method):
-                            result = method(*args, **kwargs)
-                        else:
-                            result = method
-                        if future is not None:
-                            future.set_result(result)
-                    except BaseException as e:
-                        handled = False
+                    
+                    batch = [msg]
+                    while True:
                         try:
-                            handled = bool(self.on_error(e, method_name, args, kwargs))
-                        except BaseException:
-                            pass
-                        if future is not None:
-                            if handled:
-                                future.set_result(None)
+                            next_msg = self._mailbox.try_recv()
+                            batch.append(next_msg)
+                            if next_msg is None:
+                                break
+                        except RuntimeError:  # Channel is empty — normal drain end
+                            break
+                    
+                    should_exit = False
+                    for item in batch:
+                        if item is None:
+                            should_exit = True
+                            break
+                        method_name, args, kwargs, future = item
+                        try:
+                            # Bypass the interceptor to get the actual method or property
+                            method = object.__getattribute__(self, method_name)
+                            if callable(method):
+                                result = method(*args, **kwargs)
                             else:
-                                future.set_exception(e)
-                    finally:
-                        method = None
-                        args = None
-                        kwargs = None
-                        future = None
-                        result = None
-                        msg = None
+                                result = method
+                            if future is not None:
+                                future.set_result(result)
+                        except BaseException as e:
+                            handled = False
+                            try:
+                                handled = bool(self.on_error(e, method_name, args, kwargs))
+                            except BaseException:
+                                pass
+                            if future is not None:
+                                if handled:
+                                    future.set_result(None)
+                                else:
+                                    future.set_exception(e)
+                    if should_exit:
+                        break
                 except ValueError:  # Mailbox closed
                     break
         finally:
@@ -156,8 +183,8 @@ class Actor:
                 pass
 
     def __getattribute__(self, name):
-        # Private methods/attributes and stop() are returned directly without interception
-        if name.startswith('_') or name == 'stop':
+        # Private methods/attributes, stop(), and tell() are returned directly without interception
+        if name.startswith('_') or name in ('stop', 'tell'):
             return object.__getattribute__(self, name)
 
         current_thread = threading.current_thread()

@@ -137,6 +137,12 @@ class ConcurrentMap:
         Retrieve the value associated with the key as an atomic tuple `(found: bool, val: Any)`.
         """
         ...
+
+    def get_or_insert(self, key: Any, default: Optional[Any] = None) -> Any:
+        """
+        Atomically retrieve the value associated with key, or insert and return default if key is not present.
+        """
+        ...
         
     def set(self, key: Any, value: Any) -> None:
         """
@@ -317,42 +323,44 @@ class AtomicInteger:
         """
         ...
         
-    def get(self) -> int:
+    def get(self, ordering: Optional[str] = None) -> int:
         """Get the current value."""
         ...
         
-    def set(self, val: int) -> None:
+    def set(self, val: int, ordering: Optional[str] = None) -> None:
         """Set the value."""
         ...
         
-    def fetch_add(self, delta: int) -> int:
+    def fetch_add(self, delta: int, ordering: Optional[str] = None) -> int:
         """
         Atomically add delta and return the OLD value.
         
         Args:
             delta: Value to add.
+            ordering: Optional memory ordering ("seq_cst", "relaxed", "acquire", "release", "acq_rel").
             
         Returns:
             The old value before addition.
         """
         ...
 
-    def add_and_get(self, delta: int) -> int: ...
-    def sub_and_get(self, delta: int) -> int: ...
+    def add_and_get(self, delta: int, ordering: Optional[str] = None) -> int: ...
+    def sub_and_get(self, delta: int, ordering: Optional[str] = None) -> int: ...
         
-    def fetch_sub(self, delta: int) -> int:
+    def fetch_sub(self, delta: int, ordering: Optional[str] = None) -> int:
         """
         Atomically subtract delta and return the OLD value.
         
         Args:
             delta: Value to subtract.
+            ordering: Optional memory ordering.
             
         Returns:
             The old value before subtraction.
         """
         ...
         
-    def increment(self) -> int:
+    def increment(self, ordering: Optional[str] = None) -> int:
         """
         Atomically increment the integer by 1 and return the NEW value.
         
@@ -361,7 +369,7 @@ class AtomicInteger:
         """
         ...
         
-    def decrement(self) -> int:
+    def decrement(self, ordering: Optional[str] = None) -> int:
         """
         Atomically decrement the integer by 1 and return the NEW value.
         
@@ -369,26 +377,35 @@ class AtomicInteger:
             The new decremented value.
         """
         ...
+
+    def increment_relaxed(self) -> int: ...
+    def decrement_relaxed(self) -> int: ...
+    def fetch_add_relaxed(self, delta: int) -> int: ...
+    def add_and_get_relaxed(self, delta: int) -> int: ...
+    def fetch_sub_relaxed(self, delta: int) -> int: ...
+    def sub_and_get_relaxed(self, delta: int) -> int: ...
         
-    def get_and_set(self, val: int) -> int:
+    def get_and_set(self, val: int, ordering: Optional[str] = None) -> int:
         """
         Atomically set the new value and return the OLD value.
         
         Args:
             val: The new value.
+            ordering: Optional memory ordering.
             
         Returns:
             The old value.
         """
         ...
         
-    def compare_and_set(self, expected: int, new_val: int) -> bool:
+    def compare_and_set(self, expected: int, new_val: int, ordering: Optional[str] = None) -> bool:
         """
         Atomically compare the current value to expected, and if equal, set it to new_val.
         
         Args:
             expected: The expected value.
             new_val: The new value to set.
+            ordering: Optional memory ordering.
             
         Returns:
             True if the exchange succeeded, False otherwise.
@@ -589,6 +606,13 @@ class Actor:
         >>> c.stop()
     """
     def __init__(self, mailbox_capacity: Optional[int] = None) -> None: ...
+    def tell(self, method_name: str, *args: Any, **kwargs: Any) -> None:
+        """
+        Send a non-blocking fire-and-forget message to the actor.
+        
+        Does not create or return a Future, maximizing throughput.
+        """
+        ...
     def stop(self) -> None:
         """
         Gracefully stop the actor, waiting for mailbox backlog to finish.

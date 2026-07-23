@@ -102,11 +102,7 @@ class ConcurrentDict(ConcurrentMap):
         """
         Return the value of key if present, otherwise set key to default and return default.
         """
-        found, val = self.get_val(key)
-        if found:
-            return val
-        self.set(key, default)
-        return default
+        return self.get_or_insert(key, default)
 
     def update(self, other=None, **kwargs):
         """
@@ -168,11 +164,6 @@ class ConcurrentDict(ConcurrentMap):
         """Yield key-value pairs lazily."""
         for item in self.items():
             yield item
-
-    def clear(self):
-        """Remove all items from the ConcurrentDict."""
-        for k in self.keys():
-            self.delete(k)
 
     @classmethod
     def fromkeys(cls, iterable, value=None):

@@ -1,3 +1,16 @@
+import time
+import threading
+import gc
+import sys
+import queue
+import pytest
+import pysync
+from pysync import Channel, ConcurrentDict, RwLock, AtomicInteger, AtomicBoolean, ThreadPool, ThreadGroup, Actor
+
+
+# ============================================================================
+# From test_lock.py
+# ============================================================================
 import pytest
 import threading
 import time

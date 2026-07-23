@@ -3,17 +3,20 @@ use pyo3::prelude::*;
 use pyo3::{Py, PyAny};
 use crossbeam_channel::{
     Sender, Receiver, bounded, unbounded,
-    RecvTimeoutError, SendTimeoutError, TrySendError, TryRecvError
+    RecvTimeoutError, TrySendError, TryRecvError
 };
 use std::time::Duration;
-use parking_lot::Mutex;
+use parking_lot::{RwLock, Mutex};
 
 /// A thread-safe, lock-free message passing channel based on Rust's crossbeam-channel.
 /// Supports bounded, unbounded, and unbuffered (capacity=0) rendezvous modes.
 #[pyclass]
+#[repr(align(64))]
 pub struct Channel {
-    sender: Mutex<Option<Sender<Py<PyAny>>>>,
-    receiver: Mutex<Option<Receiver<Py<PyAny>>>>,
+    sender: RwLock<Option<Sender<Py<PyAny>>>>,
+    receiver: RwLock<Option<Receiver<Py<PyAny>>>>,
+    close_tx: Mutex<Option<Sender<()>>>,
+    close_rx: Receiver<()>,
     capacity: Option<usize>,
 }
 
@@ -33,10 +36,14 @@ impl Channel {
             Some(cap) => bounded(cap),
             _ => unbounded(),
         };
+
+        let (close_tx, close_rx) = bounded::<()>(0);
         
         Ok(Channel {
-            sender: Mutex::new(Some(s)),
-            receiver: Mutex::new(Some(r)),
+            sender: RwLock::new(Some(s)),
+            receiver: RwLock::new(Some(r)),
+            close_tx: Mutex::new(Some(close_tx)),
+            close_rx,
             capacity: cap_usize,
         })
     }
@@ -45,31 +52,38 @@ impl Channel {
     #[pyo3(signature = (item, timeout=None))]
     fn send(&self, py: Python<'_>, item: Py<PyAny>, timeout: Option<f64>) -> PyResult<()> {
         let sender = {
-            let guard = self.sender.lock();
+            let guard = self.sender.read();
             guard.clone().ok_or_else(|| PyValueError::new_err("Channel is closed"))?
         };
+
+        let close_rx = self.close_rx.clone();
         
         if let Some(t) = timeout {
             if t < 0.0 {
                 return Err(PyValueError::new_err("Timeout must be non-negative"));
             }
             let duration = Duration::from_secs_f64(t);
-            let res = py.detach(|| {
-                sender.send_timeout(item, duration)
-            });
-            match res {
-                Ok(_) => Ok(()),
-                Err(SendTimeoutError::Timeout(_)) => Err(PyTimeoutError::new_err("Send operation timed out")),
-                Err(SendTimeoutError::Disconnected(_)) => Err(PyValueError::new_err("Channel is closed")),
-            }
+            py.detach(|| {
+                let timeout_rx = crossbeam_channel::after(duration);
+                crossbeam_channel::select! {
+                    send(sender, item) -> res => match res {
+                        Ok(_) => Ok(()),
+                        Err(_) => Err(PyValueError::new_err("Channel is closed")),
+                    },
+                    recv(close_rx) -> _ => Err(PyValueError::new_err("Channel is closed")),
+                    recv(timeout_rx) -> _ => Err(PyTimeoutError::new_err("Send operation timed out")),
+                }
+            })
         } else {
-            let res = py.detach(|| {
-                sender.send(item)
-            });
-            match res {
-                Ok(_) => Ok(()),
-                Err(_) => Err(PyValueError::new_err("Channel is closed")),
-            }
+            py.detach(|| {
+                crossbeam_channel::select! {
+                    send(sender, item) -> res => match res {
+                        Ok(_) => Ok(()),
+                        Err(_) => Err(PyValueError::new_err("Channel is closed")),
+                    },
+                    recv(close_rx) -> _ => Err(PyValueError::new_err("Channel is closed")),
+                }
+            })
         }
     }
 
@@ -77,7 +91,7 @@ impl Channel {
     #[pyo3(signature = (timeout=None))]
     fn recv(&self, py: Python<'_>, timeout: Option<f64>) -> PyResult<Py<PyAny>> {
         let receiver = {
-            let guard = self.receiver.lock();
+            let guard = self.receiver.read();
             guard.clone().ok_or_else(|| PyValueError::new_err("Channel is closed"))?
         };
         
@@ -108,7 +122,7 @@ impl Channel {
     /// Attempt to send an item immediately without blocking.
     fn try_send(&self, item: Py<PyAny>) -> PyResult<()> {
         let sender = {
-            let guard = self.sender.lock();
+            let guard = self.sender.read();
             guard.clone().ok_or_else(|| PyValueError::new_err("Channel is closed"))?
         };
         
@@ -122,7 +136,7 @@ impl Channel {
     /// Attempt to receive an item immediately without blocking.
     fn try_recv(&self) -> PyResult<Py<PyAny>> {
         let receiver = {
-            let guard = self.receiver.lock();
+            let guard = self.receiver.read();
             guard.clone().ok_or_else(|| PyValueError::new_err("Channel is closed"))?
         };
         
@@ -143,23 +157,31 @@ impl Channel {
         self.recv(py, Some(timeout))
     }
 
-    /// Close the channel by dropping the sender, causing receivers to wake up with Disconnected once buffered items are drained.
+    /// Close the channel by setting is_closed and dropping the close signal, unblocking all pending operations.
     fn close(&self) {
-        *self.sender.lock() = None;
+        *self.sender.write() = None;
+        *self.close_tx.lock() = None;
     }
 
     /// Create a Receive Operation wrapper for `select()`.
     fn recv_op(&self) -> PyResult<RecvOp> {
-        let guard = self.receiver.lock();
+        let guard = self.receiver.read();
         let rx = guard.clone().ok_or_else(|| PyValueError::new_err("Channel is closed"))?;
-        Ok(RecvOp { receiver: rx })
+        Ok(RecvOp {
+            receiver: rx,
+            close_rx: self.close_rx.clone(),
+        })
     }
 
     /// Create a Send Operation wrapper for `select()`.
     fn send_op(&self, item: Py<PyAny>) -> PyResult<SendOp> {
-        let guard = self.sender.lock();
+        let guard = self.sender.read();
         let tx = guard.clone().ok_or_else(|| PyValueError::new_err("Channel is closed"))?;
-        Ok(SendOp { sender: tx, item })
+        Ok(SendOp {
+            sender: tx,
+            item,
+            close_rx: self.close_rx.clone(),
+        })
     }
 
     #[getter]
@@ -211,6 +233,7 @@ impl Channel {
 #[pyclass]
 pub struct RecvOp {
     pub(crate) receiver: Receiver<Py<PyAny>>,
+    pub(crate) close_rx: Receiver<()>,
 }
 
 /// An operation descriptor for sending to a channel inside `select()`.
@@ -218,4 +241,5 @@ pub struct RecvOp {
 pub struct SendOp {
     pub(crate) sender: Sender<Py<PyAny>>,
     pub(crate) item: Py<PyAny>,
+    pub(crate) close_rx: Receiver<()>,
 }

@@ -1,23 +1,24 @@
 use std::time::Duration;
 use pyo3::prelude::*;
 use pyo3::exceptions::{PyValueError, PyTypeError, PyRuntimeError, PyTimeoutError};
-use crossbeam_channel::Select;
+use crossbeam_channel::{Select, Receiver, Sender};
 use crate::channel::{RecvOp, SendOp};
 use parking_lot::Mutex;
+use std::collections::HashMap;
 
 /// An internal enum representing parsed operation types.
 enum OpType {
-    Recv(crossbeam_channel::Receiver<Py<PyAny>>),
+    Recv(Receiver<Py<PyAny>>, Receiver<()>),
     // Send items are wrapped in a Mutex so they can be safely moved/taken inside
     // the GIL-detached closure where we need a Send-conforming contract.
-    Send(crossbeam_channel::Sender<Py<PyAny>>, Mutex<Option<Py<PyAny>>>),
+    Send(Sender<Py<PyAny>>, Mutex<Option<Py<PyAny>>>, Receiver<()>),
 }
 
 enum SelectResult {
     RecvSuccess(usize, Py<PyAny>),
     RecvClosed,
     SendSuccess(usize),
-    SendClosed(Py<PyAny>),
+    SendClosed,
     ItemConsumed,
     Timeout,
 }
@@ -41,27 +42,34 @@ pub fn select(
     for op in &ops {
         if let Ok(recv_op_bound) = op.cast::<RecvOp>() {
             let recv_op = recv_op_bound.borrow();
-            parsed_ops.push(OpType::Recv(recv_op.receiver.clone()));
+            parsed_ops.push(OpType::Recv(recv_op.receiver.clone(), recv_op.close_rx.clone()));
         } else if let Ok(send_op_bound) = op.cast::<SendOp>() {
             let send_op = send_op_bound.borrow();
             parsed_ops.push(OpType::Send(
                 send_op.sender.clone(),
                 Mutex::new(Some(send_op.item.clone_ref(py))),
+                send_op.close_rx.clone(),
             ));
         } else {
             return Err(PyTypeError::new_err("Operations must be of type RecvOp or SendOp"));
         }
     }
 
-    // Step 2: Register the channels from our cloned storage
+    // Step 2: Register the channels and close signal receivers
     let mut sel = Select::new();
-    for op in &parsed_ops {
+    let mut close_op_map = HashMap::new();
+
+    for (op_idx, op) in parsed_ops.iter().enumerate() {
         match op {
-            OpType::Recv(rx) => {
+            OpType::Recv(rx, close_rx) => {
                 sel.recv(rx);
+                let c_idx = sel.recv(close_rx);
+                close_op_map.insert(c_idx, (op_idx, false));
             }
-            OpType::Send(tx, _) => {
+            OpType::Send(tx, _, close_rx) => {
                 sel.send(tx);
+                let c_idx = sel.recv(close_rx);
+                close_op_map.insert(c_idx, (op_idx, true));
             }
         }
     }
@@ -80,22 +88,44 @@ pub fn select(
             Err(_) => return SelectResult::Timeout,
         };
 
-        let idx = oper.index();
-        match &parsed_ops[idx] {
-            OpType::Recv(rx) => {
+        let select_idx = oper.index();
+
+        if let Some(&(op_idx, is_send)) = close_op_map.get(&select_idx) {
+            let close_rx = match &parsed_ops[op_idx] {
+                OpType::Recv(_, close_rx) => close_rx,
+                OpType::Send(_, _, close_rx) => close_rx,
+            };
+            let _ = oper.recv(close_rx);
+
+            if is_send {
+                return SelectResult::SendClosed;
+            } else {
+                if let OpType::Recv(rx, _) = &parsed_ops[op_idx] {
+                    if let Ok(item) = rx.try_recv() {
+                        return SelectResult::RecvSuccess(op_idx, item);
+                    }
+                }
+                return SelectResult::RecvClosed;
+            }
+        }
+
+        let op_idx = select_idx / 2;
+
+        match &parsed_ops[op_idx] {
+            OpType::Recv(rx, _) => {
                 match oper.recv(rx) {
-                    Ok(res) => SelectResult::RecvSuccess(idx, res),
+                    Ok(res) => SelectResult::RecvSuccess(op_idx, res),
                     Err(_) => SelectResult::RecvClosed,
                 }
             }
-            OpType::Send(tx, item_mutex) => {
+            OpType::Send(tx, item_mutex, _) => {
                 let item = match item_mutex.lock().take() {
                     Some(it) => it,
                     None => return SelectResult::ItemConsumed,
                 };
                 match oper.send(tx, item) {
-                    Ok(_) => SelectResult::SendSuccess(idx),
-                    Err(err) => SelectResult::SendClosed(err.0),
+                    Ok(_) => SelectResult::SendSuccess(op_idx),
+                    Err(_) => SelectResult::SendClosed,
                 }
             }
         }
@@ -105,7 +135,7 @@ pub fn select(
         SelectResult::RecvSuccess(idx, item) => Ok((idx, Some(item))),
         SelectResult::SendSuccess(idx) => Ok((idx, None)),
         SelectResult::RecvClosed => Err(PyValueError::new_err("Selected channel is closed and empty")),
-        SelectResult::SendClosed(_dropped_item) => Err(PyValueError::new_err("Selected channel is closed")),
+        SelectResult::SendClosed => Err(PyValueError::new_err("Selected channel is closed")),
         SelectResult::ItemConsumed => Err(PyRuntimeError::new_err("Send item already consumed")),
         SelectResult::Timeout => Err(PyTimeoutError::new_err("select() timed out waiting for ready channel")),
     }
