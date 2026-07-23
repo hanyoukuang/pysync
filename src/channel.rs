@@ -8,6 +8,9 @@ use crossbeam_channel::{
 use std::time::Duration;
 use parking_lot::Mutex;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 /// A thread-safe, lock-free message passing channel based on Rust's crossbeam-channel.
 /// Supports bounded, unbounded, and unbuffered (capacity=0) rendezvous modes.
 #[pyclass]
@@ -15,6 +18,7 @@ pub struct Channel {
     sender: Mutex<Option<Sender<Py<PyAny>>>>,
     receiver: Mutex<Option<Receiver<Py<PyAny>>>>,
     capacity: Option<usize>,
+    pub(crate) closed: Arc<AtomicBool>,
 }
 
 #[pymethods]
@@ -38,6 +42,7 @@ impl Channel {
             sender: Mutex::new(Some(s)),
             receiver: Mutex::new(Some(r)),
             capacity: cap_usize,
+            closed: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -48,27 +53,50 @@ impl Channel {
             let guard = self.sender.lock();
             guard.clone().ok_or_else(|| PyValueError::new_err("Channel is closed"))?
         };
+        let closed = self.closed.clone();
         
         if let Some(t) = timeout {
             if t < 0.0 {
                 return Err(PyValueError::new_err("Timeout must be non-negative"));
             }
             let duration = Duration::from_secs_f64(t);
-            let res = py.detach(|| {
-                sender.send_timeout(item, duration)
-            });
-            match res {
-                Ok(_) => Ok(()),
-                Err(SendTimeoutError::Timeout(_)) => Err(PyTimeoutError::new_err("Send operation timed out")),
-                Err(SendTimeoutError::Disconnected(_)) => Err(PyValueError::new_err("Channel is closed")),
+            let start = std::time::Instant::now();
+            let mut val = item;
+            loop {
+                if closed.load(Ordering::SeqCst) {
+                    return Err(PyValueError::new_err("Channel is closed"));
+                }
+                let remaining = duration.saturating_sub(start.elapsed());
+                if remaining.is_zero() {
+                    return Err(PyTimeoutError::new_err("Send operation timed out"));
+                }
+                let poll_time = Duration::from_millis(50).min(remaining);
+                let res = py.detach(|| sender.send_timeout(val, poll_time));
+                match res {
+                    Ok(_) => return Ok(()),
+                    Err(SendTimeoutError::Timeout(item_back)) => {
+                        val = item_back;
+                        continue;
+                    }
+                    Err(SendTimeoutError::Disconnected(_)) => return Err(PyValueError::new_err("Channel is closed")),
+                }
             }
         } else {
-            let res = py.detach(|| {
-                sender.send(item)
-            });
-            match res {
-                Ok(_) => Ok(()),
-                Err(_) => Err(PyValueError::new_err("Channel is closed")),
+            let mut val = item;
+            loop {
+                if closed.load(Ordering::SeqCst) {
+                    return Err(PyValueError::new_err("Channel is closed"));
+                }
+                let poll_time = Duration::from_millis(50);
+                let res = py.detach(|| sender.send_timeout(val, poll_time));
+                match res {
+                    Ok(_) => return Ok(()),
+                    Err(SendTimeoutError::Timeout(item_back)) => {
+                        val = item_back;
+                        continue;
+                    }
+                    Err(SendTimeoutError::Disconnected(_)) => return Err(PyValueError::new_err("Channel is closed")),
+                }
             }
         }
     }
@@ -78,29 +106,60 @@ impl Channel {
     fn recv(&self, py: Python<'_>, timeout: Option<f64>) -> PyResult<Py<PyAny>> {
         let receiver = {
             let guard = self.receiver.lock();
-            guard.clone().ok_or_else(|| PyValueError::new_err("Channel is closed"))?
+            guard.clone().ok_or_else(|| PyValueError::new_err("Channel is closed and empty"))?
         };
+        let closed = self.closed.clone();
         
         if let Some(t) = timeout {
             if t < 0.0 {
                 return Err(PyValueError::new_err("Timeout must be non-negative"));
             }
             let duration = Duration::from_secs_f64(t);
-            let res = py.detach(|| {
-                receiver.recv_timeout(duration)
-            });
-            match res {
-                Ok(item) => Ok(item),
-                Err(RecvTimeoutError::Timeout) => Err(PyTimeoutError::new_err("Receive operation timed out")),
-                Err(RecvTimeoutError::Disconnected) => Err(PyValueError::new_err("Channel is closed and empty")),
+            let start = std::time::Instant::now();
+            loop {
+                if closed.load(Ordering::SeqCst) {
+                    if let Ok(item) = receiver.try_recv() {
+                        return Ok(item);
+                    }
+                    return Err(PyValueError::new_err("Channel is closed and empty"));
+                }
+                let remaining = duration.saturating_sub(start.elapsed());
+                if remaining.is_zero() {
+                    return Err(PyTimeoutError::new_err("Receive operation timed out"));
+                }
+                let poll_time = Duration::from_millis(50).min(remaining);
+                let res = py.detach(|| receiver.recv_timeout(poll_time));
+                match res {
+                    Ok(item) => return Ok(item),
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => {
+                        if let Ok(item) = receiver.try_recv() {
+                            return Ok(item);
+                        }
+                        return Err(PyValueError::new_err("Channel is closed and empty"));
+                    }
+                }
             }
         } else {
-            let res = py.detach(|| {
-                receiver.recv()
-            });
-            match res {
-                Ok(item) => Ok(item),
-                Err(_) => Err(PyValueError::new_err("Channel is closed and empty")),
+            loop {
+                if closed.load(Ordering::SeqCst) {
+                    if let Ok(item) = receiver.try_recv() {
+                        return Ok(item);
+                    }
+                    return Err(PyValueError::new_err("Channel is closed and empty"));
+                }
+                let poll_time = Duration::from_millis(50);
+                let res = py.detach(|| receiver.recv_timeout(poll_time));
+                match res {
+                    Ok(item) => return Ok(item),
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => {
+                        if let Ok(item) = receiver.try_recv() {
+                            return Ok(item);
+                        }
+                        return Err(PyValueError::new_err("Channel is closed and empty"));
+                    }
+                }
             }
         }
     }
@@ -145,6 +204,7 @@ impl Channel {
 
     /// Close the channel by dropping the sender, causing receivers to wake up with Disconnected once buffered items are drained.
     fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
         *self.sender.lock() = None;
     }
 
@@ -152,14 +212,17 @@ impl Channel {
     fn recv_op(&self) -> PyResult<RecvOp> {
         let guard = self.receiver.lock();
         let rx = guard.clone().ok_or_else(|| PyValueError::new_err("Channel is closed"))?;
-        Ok(RecvOp { receiver: rx })
+        Ok(RecvOp { receiver: rx, closed: self.closed.clone() })
     }
 
     /// Create a Send Operation wrapper for `select()`.
     fn send_op(&self, item: Py<PyAny>) -> PyResult<SendOp> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(PyValueError::new_err("Channel is closed"));
+        }
         let guard = self.sender.lock();
         let tx = guard.clone().ok_or_else(|| PyValueError::new_err("Channel is closed"))?;
-        Ok(SendOp { sender: tx, item })
+        Ok(SendOp { sender: tx, item, closed: self.closed.clone() })
     }
 
     #[getter]
@@ -211,6 +274,7 @@ impl Channel {
 #[pyclass]
 pub struct RecvOp {
     pub(crate) receiver: Receiver<Py<PyAny>>,
+    pub(crate) closed: Arc<AtomicBool>,
 }
 
 /// An operation descriptor for sending to a channel inside `select()`.
@@ -218,4 +282,5 @@ pub struct RecvOp {
 pub struct SendOp {
     pub(crate) sender: Sender<Py<PyAny>>,
     pub(crate) item: Py<PyAny>,
+    pub(crate) closed: Arc<AtomicBool>,
 }

@@ -4,10 +4,10 @@ import threading
 from pysync import Channel, select
 
 # ==========================================
-# 1. VALID/HAPPY PATH PARAMETERIZED TESTS (25 cases)
+# 1. Execution & Concurrency Tests
 # ==========================================
 
-# Definining parameters for happy paths:
+# Test parameters for valid operations:
 # (capacity, value_to_send, use_timeout, timeout_val)
 valid_test_cases = [
     # Bounded channels (Cases 1-10)
@@ -50,7 +50,7 @@ def test_channel_valid_basic(capacity, val, use_timeout, timeout_val):
     assert res == val
 
 def test_channel_valid_multithreaded():
-    """Multi-threaded tests covering remainder of the 25 happy path cases."""
+    """Multi-threaded tests covering valid channel operations."""
     # Case 21: Bounded 1 producer, 1 consumer thread
     chan = Channel(capacity=10)
     def producer():
@@ -103,7 +103,7 @@ def test_channel_valid_multithreaded():
     assert len(cons_results) == 2
 
 # ==========================================
-# 2. BOUNDARY PARAMETERIZED TESTS (25 cases)
+# 2. Boundary Tests
 # ==========================================
 boundary_cases = [
     # Cap-1 edge cases
@@ -131,7 +131,7 @@ def test_channel_boundary_values(capacity, boundary_val):
     assert chan.recv() == boundary_val
 
 def test_channel_boundary_closing():
-    """Test closing boundaries (remainder of 25 cases)."""
+    """Test closing boundaries."""
     # Channel closing and draining values
     chan = Channel(capacity=5)
     chan.send(10)
@@ -153,7 +153,7 @@ def test_channel_boundary_closing():
         chan2.recv()
 
 # ==========================================
-# 3. ERROR PARAMETERIZED TESTS (25 cases)
+# 3. Error Handling Tests
 # ==========================================
 
 # Invalid capacity errors (must raise ValueError or TypeError)
@@ -293,7 +293,7 @@ def test_channel_send_timeout_object_cleanup():
 
 
 def test_channel_try_send_full_recovery():
-    """High Quality: Verify try_send raises RuntimeError on full channel and recovers after try_recv."""
+    """Verify try_send raises RuntimeError on full channel and recovers after try_recv."""
     ch = Channel(capacity=2)
     ch.try_send("a")
     ch.try_send("b")
@@ -309,7 +309,7 @@ def test_channel_try_send_full_recovery():
 
 
 def test_channel_select_fairness_distribution():
-    """High Quality: Verify select() distributes reads fairly across 4 ready channels."""
+    """Verify select() distributes reads fairly across 4 ready channels."""
     chans = [Channel(capacity=200) for _ in range(4)]
     for i, ch in enumerate(chans):
         for _ in range(100):  # 100 items per channel = 400 total
@@ -322,5 +322,5 @@ def test_channel_select_fairness_distribution():
         counts[idx] += 1
 
     # Statistical check: every channel should be selected at least 25 times out of 200
-    assert all(c >= 25 for c in counts.values()), f"Select 采样过于偏差: {counts}"
+    assert all(c >= 25 for c in counts.values()), f"Select distribution biased: {counts}"
 

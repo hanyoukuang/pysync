@@ -4,7 +4,7 @@ import threading
 from pysync import ConcurrentMap, ConcurrentDict
 
 # ==========================================
-# 1. VALID/HAPPY PATH PARAMETERIZED TESTS (25 cases)
+# 1. Execution & Concurrency Tests
 # ==========================================
 
 # Parameterized cases for standard get/set operations
@@ -72,7 +72,7 @@ def test_map_collection_methods():
     assert len(d) == 0
 
 def test_map_concurrent_access():
-    """Verify concurrent reads and writes from multiple threads (remaining happy path cases)."""
+    """Verify concurrent reads and writes from multiple threads."""
     d = ConcurrentDict()
     
     # Concurrent write to different keys
@@ -106,7 +106,7 @@ def test_map_concurrent_access():
         t.join()
 
 # ==========================================
-# 2. BOUNDARY PARAMETERIZED TESTS (25 cases)
+# 2. Boundary Tests
 # ==========================================
 boundary_cases = [
     ("", "empty_string_key"),
@@ -139,7 +139,7 @@ def test_map_boundary_nonexistent_deletion():
     assert m.delete("nonexistent") is False
 
 # ==========================================
-# 3. ERROR PARAMETERIZED TESTS (25 cases)
+# 3. Error Handling Tests
 # ==========================================
 
 # Unhashable types as keys must raise TypeError
@@ -278,7 +278,7 @@ def test_map_ownership_and_value_independence():
 
 
 def test_concurrent_dict_atomic_setdefault_high_stress():
-    """High Quality: 32 threads calling setdefault on the same key return identical value."""
+    """32 threads calling setdefault on the same key return identical value."""
     d = ConcurrentDict()
     results = []
     lock = threading.Lock()
@@ -292,12 +292,12 @@ def test_concurrent_dict_atomic_setdefault_high_stress():
     for t in threads: t.start()
     for t in threads: t.join()
 
-    assert len(set(results)) == 1, f"setdefault 非原子，返回了多个不同值: {set(results)}"
+    assert len(set(results)) == 1, f"setdefault non-atomic, returned multiple values: {set(results)}"
     assert d.get("consensus_key") == results[0]
 
 
 def test_concurrent_dict_pop_nonexistent_and_existing():
-    """High Quality: Verify ConcurrentDict pop(key, default) is thread-safe across 16 threads."""
+    """Verify ConcurrentDict pop(key, default) is thread-safe across 16 threads."""
     d = ConcurrentDict()
     for i in range(100):
         d[f"k_{i}"] = i
@@ -327,7 +327,7 @@ def test_concurrent_dict_pop_nonexistent_and_existing():
 
 
 def test_concurrent_map_items_snapshot_consistency():
-    """High Quality: Verify iter_items() returns a valid list without throwing exceptions while writers mutate."""
+    """Verify iter_items() returns a valid list without throwing exceptions while writers mutate."""
     m = ConcurrentMap(8)
     for i in range(500):
         m.set(f"item_{i}", i)
@@ -362,5 +362,5 @@ def test_concurrent_map_items_snapshot_consistency():
     w_thread.join()
     for r in r_threads: r.join()
 
-    assert not errors, f"并发 items() 读取出错: {errors}"
+    assert not errors, f"Concurrent items() read error: {errors}"
 

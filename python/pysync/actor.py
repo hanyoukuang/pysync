@@ -71,6 +71,7 @@ class Actor:
     def __init__(self, mailbox_capacity=None):
         self._mailbox = Channel(capacity=mailbox_capacity)
         self._thread = None
+        self._stopped = False
         self._lock = threading.Lock()
 
     def on_start(self):
@@ -105,7 +106,7 @@ class Actor:
         try:
             self.on_start()
         except BaseException as e:
-            # BUG-7 fix: route on_start() failures through the on_error supervision
+            # Route on_start() failures through the on_error supervision hook
             # hook so users can observe/handle Actor startup failures, instead of
             # swallowing the exception silently.
             try:
@@ -150,6 +151,22 @@ class Actor:
                 except ValueError:  # Mailbox closed
                     break
         finally:
+            # Drain any remaining messages left in mailbox and set exception on their futures
+            try:
+                mailbox = object.__getattribute__(self, '_mailbox')
+                while True:
+                    try:
+                        msg = mailbox.recv_timeout(0.0)
+                        if msg is None:
+                            continue
+                        _, _, _, future = msg
+                        if future is not None and not future.done():
+                            future.set_exception(RuntimeError("Actor is stopped"))
+                    except Exception:
+                        break
+            except Exception:
+                pass
+
             try:
                 self.on_stop()
             except BaseException:
@@ -170,12 +187,6 @@ class Actor:
         if actor_thread is not None and current_thread == actor_thread:
             return object.__getattribute__(self, name)
 
-        try:
-            if object.__getattribute__(self, '_stopped'):
-                raise RuntimeError("Actor is stopped")
-        except AttributeError:
-            pass
-
         # Check if attribute is a property descriptor on the class
         cls_attr = getattr(type(self), name, None)
         is_prop = isinstance(cls_attr, property)
@@ -185,7 +196,15 @@ class Actor:
             def async_prop_get():
                 future: Future[Any] = Future()
                 try:
-                    object.__getattribute__(self, '_mailbox').send((name, (), {}, future))
+                    try:
+                        stopped = object.__getattribute__(self, '_stopped')
+                    except AttributeError:
+                        stopped = False
+
+                    if stopped:
+                        future.set_exception(RuntimeError("Actor is stopped"))
+                    else:
+                        object.__getattribute__(self, '_mailbox').send((name, (), {}, future))
                 except (ValueError, RuntimeError) as err:
                     future.set_exception(RuntimeError(f"Actor is stopped: {err}"))
                 return future
@@ -201,7 +220,15 @@ class Actor:
             def async_call(*args, **kwargs):
                 future: Future[Any] = Future()
                 try:
-                    object.__getattribute__(self, '_mailbox').send((name, args, kwargs, future))
+                    try:
+                        stopped = object.__getattribute__(self, '_stopped')
+                    except AttributeError:
+                        stopped = False
+
+                    if stopped:
+                        future.set_exception(RuntimeError("Actor is stopped"))
+                    else:
+                        object.__getattribute__(self, '_mailbox').send((name, args, kwargs, future))
                 except (ValueError, RuntimeError) as err:
                     future.set_exception(RuntimeError(f"Actor is stopped: {err}"))
                 return future
@@ -276,10 +303,16 @@ class Actor:
             current_thread = threading.current_thread()
             if current_thread != thread:
                 thread.join(timeout=timeout)
-            try:
-                object.__getattribute__(self, '_mailbox').close()
-            except Exception:
-                pass
+
+    def __del__(self):
+        try:
+            self.stop(timeout=0.05)
+        except Exception:
+            pass
+        try:
+            object.__getattribute__(self, '_mailbox').close()
+        except Exception:
+            pass
 
 # Wrap Actor's own __init__
 Actor.__init__ = _wrap_init(Actor.__init__)  # type: ignore[method-assign]

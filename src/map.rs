@@ -144,9 +144,9 @@ impl ConcurrentMap {
             }
         }
 
-        // Check if key exists in list via pointer identity without executing Python __eq__ under lock
+        // Re-check existing list entries under lock in case key was deleted and re-inserted during the lock-release window
         for (pos, (k, _)) in list.iter().enumerate() {
-            if k.is(&pykey) {
+            if k.is(&pykey) || k.bind(py).eq(&key)? {
                 list[pos].1 = value;
                 return Ok(());
             }
@@ -194,9 +194,9 @@ impl ConcurrentMap {
                     return Ok(true);
                 }
             }
-            // Fallback check using pointer identity without executing Python __eq__ under lock
+            // Fallback check: verify equality under lock if key was re-inserted concurrently
             for pos in 0..list.len() {
-                if list[pos].0.is(&key) {
+                if list[pos].0.is(&key) || list[pos].0.bind(py).eq(&key)? {
                     list.remove(pos);
                     if list.is_empty() {
                         shard.remove(&h);
@@ -247,9 +247,9 @@ impl ConcurrentMap {
                     return Ok((true, val));
                 }
             }
-            // Fallback check using pointer identity without executing Python __eq__ under lock
+            // Fallback check: verify equality under lock if key was re-inserted concurrently
             for pos in 0..list.len() {
-                if list[pos].0.is(&key) {
+                if list[pos].0.is(&key) || list[pos].0.bind(py).eq(&key)? {
                     let (_, val) = list.remove(pos);
                     if list.is_empty() {
                         shard.remove(&h);
@@ -259,6 +259,52 @@ impl ConcurrentMap {
             }
         }
         Ok((false, py.None()))
+    }
+
+    /// Atomic setdefault: if key is present, returns `(true, existing_value)`;
+    /// if absent, inserts `default` and returns `(false, default)`.
+    fn setdefault_val(&self, py: Python<'_>, key: Bound<'_, PyAny>, default: Py<PyAny>) -> PyResult<(bool, Py<PyAny>)> {
+        check_hashable(py, &key)?;
+        let h = key.hash()? as u64;
+        let idx = (h as usize) % self.shards.len();
+        let pykey = key.clone().unbind();
+
+        let candidate_keys = {
+            let shard = self.shards[idx].lock();
+            shard.get(&h).map(|list| {
+                list.iter()
+                    .map(|(k, _)| k.clone_ref(py))
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        let mut matching_key = None;
+        if let Some(keys) = &candidate_keys {
+            for k in keys {
+                if k.bind(py).eq(&key)? {
+                    matching_key = Some(k.clone_ref(py));
+                    break;
+                }
+            }
+        }
+
+        let mut shard = self.shards[idx].lock();
+        let list = shard.entry(h).or_insert_with(Vec::new);
+
+        if let Some(m_key) = matching_key {
+            if let Some(pos) = list.iter().position(|(k, _)| k.is(&m_key)) {
+                return Ok((true, list[pos].1.clone_ref(py)));
+            }
+        }
+
+        for (k, v) in list.iter() {
+            if k.is(&pykey) || k.bind(py).eq(&key)? {
+                return Ok((true, v.clone_ref(py)));
+            }
+        }
+
+        list.push((pykey, default.clone_ref(py)));
+        Ok((false, default))
     }
 
     /// Check if the key exists in the map.

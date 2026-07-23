@@ -41,9 +41,15 @@ pub fn select(
     for op in &ops {
         if let Ok(recv_op_bound) = op.cast::<RecvOp>() {
             let recv_op = recv_op_bound.borrow();
+            if recv_op.closed.load(std::sync::atomic::Ordering::SeqCst) && recv_op.receiver.is_empty() {
+                return Err(PyValueError::new_err("Channel is closed and empty"));
+            }
             parsed_ops.push(OpType::Recv(recv_op.receiver.clone()));
         } else if let Ok(send_op_bound) = op.cast::<SendOp>() {
             let send_op = send_op_bound.borrow();
+            if send_op.closed.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(PyValueError::new_err("Channel is closed"));
+            }
             parsed_ops.push(OpType::Send(
                 send_op.sender.clone(),
                 Mutex::new(Some(send_op.item.clone_ref(py))),

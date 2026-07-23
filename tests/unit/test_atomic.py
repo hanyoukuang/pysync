@@ -3,7 +3,7 @@ import threading
 from pysync import AtomicInteger, AtomicBoolean
 
 # ==========================================
-# 1. VALID/HAPPY PATH PARAMETERIZED TESTS (15+ cases)
+# 1. Execution & Concurrency Tests
 # ==========================================
 
 def test_atomic_integer_basic():
@@ -96,7 +96,7 @@ def test_atomic_integer_concurrent_updates():
     assert counter.get() == num_threads * increments_per_thread
 
 # ==========================================
-# 2. BOUNDARY PARAMETERIZED TESTS (15 cases)
+# 2. Boundary Tests
 # ==========================================
 
 boundary_cases = [
@@ -127,7 +127,7 @@ def test_atomic_integer_boundary_values(initial, delta):
     assert a.get() == wrap_to_i64(initial + delta)
 
 # ==========================================
-# 3. ERROR PARAMETERIZED TESTS (15 cases)
+# 3. Error Handling Tests
 # ==========================================
 
 invalid_init_types = [

@@ -21,7 +21,7 @@ class CounterActor(Actor):
         return x / y
 
 # ==========================================
-# 1. VALID/HAPPY PATH PARAMETERIZED TESTS (25 cases)
+# 1. Execution & Concurrency Tests
 # ==========================================
 
 def test_actor_basic_execution():
@@ -75,7 +75,7 @@ def test_actor_private_attributes_non_intercepted():
         actor.stop()
 
 # ==========================================
-# 2. BOUNDARY PARAMETERIZED TESTS (25 cases)
+# 2. Boundary Tests
 # ==========================================
 
 def test_actor_immediate_stop():
@@ -100,7 +100,7 @@ def test_actor_multiple_queued_messages():
         actor.stop()
 
 # ==========================================
-# 3. ERROR PARAMETERIZED TESTS (25 cases)
+# 3. Error Handling Tests
 # ==========================================
 
 @pytest.mark.parametrize("exception_cls", [
@@ -251,7 +251,7 @@ def test_actor_init_exception_handling():
 
 
 def test_actor_concurrent_requests_order_preservation():
-    """High Quality: Verify 16 concurrent threads sending ops to an Actor maintain sequential state safety."""
+    """Verify 16 concurrent threads sending ops to an Actor maintain sequential state safety."""
     class OrderActor(Actor):
         def __init__(self):
             super().__init__()
@@ -282,7 +282,7 @@ def test_actor_concurrent_requests_order_preservation():
 
 
 def test_actor_supervision_recovery_flow():
-    """High Quality: Verify on_error returning True suppresses errors across multiple failures."""
+    """Verify on_error returning True suppresses errors across multiple failures."""
     class ResilientActor(Actor):
         def __init__(self):
             super().__init__()
@@ -314,7 +314,7 @@ def test_actor_supervision_recovery_flow():
 
 
 def test_actor_reentrant_self_call_safety():
-    """High Quality: Verify Actor internal method calling another internal method on self executes directly without deadlock."""
+    """Verify Actor internal method calling another internal method on self executes directly without deadlock."""
     class ReentrantActor(Actor):
         def internal_helper(self, x):
             return x * 10
@@ -334,7 +334,7 @@ def test_actor_reentrant_self_call_safety():
 
 
 def test_actor_state_encapsulation_strict_enforcement():
-    """High Quality: Verify direct external mutation or access of public state raises AttributeError across 16 threads."""
+    """Verify direct external mutation or access of public state raises AttributeError across 16 threads."""
     class BankAccountActor(Actor):
         def __init__(self):
             super().__init__()

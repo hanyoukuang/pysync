@@ -12,7 +12,7 @@ def task_raise(err_type, msg):
     raise err_type(msg)
 
 # ==========================================
-# 1. VALID/HAPPY PATH PARAMETERIZED TESTS (25 cases)
+# 1. Execution & Concurrency Tests
 # ==========================================
 
 def test_thread_group_basic_spawn():
@@ -32,7 +32,7 @@ def test_thread_group_basic_spawn():
     assert sorted(results) == [1, 2]
 
 def test_thread_group_parameter_passing():
-    """Verify that ThreadGroup correctly forwards variable arguments to target functions (happy paths)."""
+    """Verify that ThreadGroup correctly forwards variable arguments to target functions."""
     results = []
     
     def greet(name, greeting="Hello"):
@@ -46,7 +46,7 @@ def test_thread_group_parameter_passing():
     assert sorted(results) == ["Good day, Charlie", "Hello, Alice", "Hi, Bob"]
 
 # ==========================================
-# 2. BOUNDARY PARAMETERIZED TESTS (25 cases)
+# 2. Boundary Tests
 # ==========================================
 
 def test_thread_group_empty():
@@ -69,7 +69,7 @@ def test_thread_group_exception_in_body():
     assert results == [100]
 
 # ==========================================
-# 3. ERROR PARAMETERIZED TESTS (25 cases)
+# 3. Error Handling Tests
 # ==========================================
 
 @pytest.mark.parametrize("exception_cls", [

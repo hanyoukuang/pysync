@@ -4,7 +4,7 @@ import time
 from pysync import RwLock
 
 # ==========================================
-# 1. VALID/HAPPY PATH PARAMETERIZED TESTS (25 cases)
+# 1. Execution & Concurrency Tests
 # ==========================================
 
 def test_rwlock_basic_read_write():
@@ -62,7 +62,7 @@ def test_rwlock_write_exclusion():
     assert shared_data == ["writing", "done_writing", "read_2"]
 
 def test_rwlock_multi_read_write_flow():
-    """Test multi-threaded read/write consistency (remaining happy path cases)."""
+    """Test multi-threaded read/write consistency."""
     lock = RwLock()
     state = {"value": 0}
     
@@ -86,7 +86,7 @@ def test_rwlock_multi_read_write_flow():
     assert state["value"] == 150
 
 # ==========================================
-# 2. BOUNDARY PARAMETERIZED TESTS (25 cases)
+# 2. Boundary Tests
 # ==========================================
 
 @pytest.mark.parametrize("exception_cls", [
@@ -144,7 +144,7 @@ def test_rwlock_heavy_contention():
     assert counter[0] == 2000
 
 # ==========================================
-# 3. ERROR PARAMETERIZED TESTS (25 cases)
+# 3. Error Handling Tests
 # ==========================================
 
 def test_rwlock_error_nesting_exceptions():

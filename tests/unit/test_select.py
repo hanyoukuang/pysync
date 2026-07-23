@@ -4,7 +4,7 @@ import time
 from pysync import Channel, select
 
 # ==========================================
-# 1. VALID/HAPPY PATH PARAMETERIZED TESTS (25 cases)
+# 1. Execution & Concurrency Tests
 # ==========================================
 
 def test_select_basic_recv_ready():
@@ -55,7 +55,7 @@ def test_select_mixed_ready():
         assert val == "recv_val"
 
 def test_select_multithreaded_wakeup():
-    """Test select blocking until a background thread sends to a channel (remaining happy path cases)."""
+    """Test select blocking until a background thread sends to a channel."""
     c1, c2, c3 = Channel(), Channel(), Channel()
     
     def delayed_sender():
@@ -73,7 +73,7 @@ def test_select_multithreaded_wakeup():
     t.join()
 
 # ==========================================
-# 2. BOUNDARY PARAMETERIZED TESTS (25 cases)
+# 2. Boundary Tests
 # ==========================================
 
 def test_select_single_op():
@@ -124,7 +124,7 @@ def test_select_closed_channel_wakeup():
     t.join()
 
 # ==========================================
-# 3. ERROR PARAMETERIZED TESTS (25 cases)
+# 3. Error Handling Tests
 # ==========================================
 
 def test_select_error_empty_list():

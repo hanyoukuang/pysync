@@ -4,7 +4,7 @@ _sentinel = object()
 
 class ConcurrentDict(ConcurrentMap):
     """
-    A highly concurrent, thread-safe dictionary wrapping dashmap.
+    A highly concurrent, thread-safe dictionary wrapping ConcurrentMap.
     
     Fully conforms to Python's mapping protocols. Optimized for multi-threaded
     reads and writes under free-threaded Python 3.14 (GIL-free).
@@ -102,23 +102,23 @@ class ConcurrentDict(ConcurrentMap):
         """
         Return the value of key if present, otherwise set key to default and return default.
         """
-        found, val = self.get_val(key)
-        if found:
-            return val
-        self.set(key, default)
-        return default
+        found, val = self.setdefault_val(key, default)
+        return val
 
     def update(self, other=None, **kwargs):
         """
         Update the dictionary with key-value pairs from other, overwriting existing keys.
         """
         if other is not None:
-            if hasattr(other, 'keys'):
-                for k in other.keys():
-                    self.set(k, other[k])
-            elif hasattr(other, 'items'):
-                for k, v in other.items():
+            if hasattr(other, 'items'):
+                for k, v in list(other.items()):
                     self.set(k, v)
+            elif hasattr(other, 'keys'):
+                for k in list(other.keys()):
+                    try:
+                        self.set(k, other[k])
+                    except KeyError:
+                        pass
             else:
                 for k, v in other:
                     self.set(k, v)
@@ -133,7 +133,7 @@ class ConcurrentDict(ConcurrentMap):
         Thread-safe: uses atomic pop_val() to avoid TOCTOU races where two
         threads could popitem() the same key simultaneously.
         """
-        # BUG-1 fix: iterate snapshot keys and use atomic pop_val().
+        # Iterate snapshot keys and use atomic pop_val().
         # If another thread already popped a candidate key, skip to the next one.
         # Retry the full snapshot if every candidate was taken concurrently.
         while True:
@@ -171,8 +171,7 @@ class ConcurrentDict(ConcurrentMap):
 
     def clear(self):
         """Remove all items from the ConcurrentDict."""
-        for k in self.keys():
-            self.delete(k)
+        super().clear()
 
     @classmethod
     def fromkeys(cls, iterable, value=None):

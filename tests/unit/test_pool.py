@@ -20,7 +20,7 @@ def get_thread_id():
     return threading.get_ident()
 
 # ==========================================
-# 1. VALID/HAPPY PATH PARAMETERIZED TESTS (25 cases)
+# 1. Execution & Concurrency Tests
 # ==========================================
 
 # Positional and keyword argument test cases
@@ -49,7 +49,7 @@ def test_pool_submit_valid(func, args, kwargs, expected):
         pool.shutdown()
 
 def test_pool_multi_worker_distribution():
-    """Verify that tasks are executed across different worker threads (remainder of 25 cases)."""
+    """Verify that tasks are executed across different worker threads."""
     pool = ThreadPool(num_workers=4)
     try:
         futures = [pool.submit(get_thread_id) for _ in range(20)]
@@ -80,7 +80,7 @@ def test_pool_concurrent_submitters():
         pool.shutdown()
 
 # ==========================================
-# 2. BOUNDARY PARAMETERIZED TESTS (25 cases)
+# 2. Boundary Tests
 # ==========================================
 
 def test_pool_single_worker():
@@ -126,7 +126,7 @@ def test_pool_shutdown_drains_queue():
     assert sorted(results) == [0, 1, 2, 3, 4]
 
 # ==========================================
-# 3. ERROR PARAMETERIZED TESTS (25 cases)
+# 3. Error Handling Tests
 # ==========================================
 
 error_test_cases = [

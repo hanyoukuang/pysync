@@ -21,21 +21,16 @@ type ReaderRegistry = Arc<Mutex<HashMap<ThreadId, usize>>>;
 /// A native Reader-Writer lock based on parking_lot::RwLock.
 /// Allows multiple concurrent readers or a single exclusive writer.
 ///
-/// ## Writer-starvation prevention (BUG-6 fix)
-/// The original implementation always used `read_arc_recursive()`, which bypasses
-/// parking_lot's writer-preference queue even for *new* (non-reentrant) readers.
-/// This allowed a steady stream of new readers to starve a waiting writer
-/// indefinitely.
-///
-/// Fix: we track how many read locks each OS thread holds in `reader_registry`.
-/// - First acquisition on a thread  → `read_arc()` / `try_read_arc()`
-///   These respect the writer queue: new readers block when a writer is waiting.
-/// - Re-entrant acquisition on the same thread → `read_arc_recursive()`
-///   This bypasses the queue only when necessary to prevent self-deadlock.
+/// ## Writer-starvation prevention
+/// To prevent new readers from starving waiting writers while avoiding re-entrancy deadlocks:
+/// - First acquisition on a thread  → `read_arc()` / `try_read_arc()` (writer-preferred queue).
+/// - Re-entrant acquisition on the same thread → `read_arc_recursive()` (bypasses queue for self-deadlock prevention).
 #[pyclass]
 pub struct RwLock {
     lock: Arc<parking_lot::RwLock<()>>,
     reader_registry: ReaderRegistry,
+    raw_read_counts: Arc<Mutex<HashMap<ThreadId, usize>>>,
+    raw_write_owners: Arc<Mutex<HashMap<ThreadId, usize>>>,
 }
 
 /// A context-manager guard for holding shared read access of an RwLock.
@@ -64,6 +59,8 @@ impl RwLock {
         RwLock {
             lock: Arc::new(parking_lot::RwLock::new(())),
             reader_registry: Arc::new(Mutex::new(HashMap::new())),
+            raw_read_counts: Arc::new(Mutex::new(HashMap::new())),
+            raw_write_owners: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -87,45 +84,86 @@ impl RwLock {
     /// Direct read lock acquisition (zero Python object allocation).
     fn acquire_read(&self, py: Python<'_>) {
         let lock = self.lock.clone();
+        let tid = std::thread::current().id();
         py.detach(|| {
             unsafe {
                 lock.raw().lock_shared();
             }
         });
+        *self.raw_read_counts.lock().entry(tid).or_insert(0) += 1;
+        *self.reader_registry.lock().entry(tid).or_insert(0) += 1;
     }
 
     /// Direct read lock release.
-    fn release_read(&self) {
-        unsafe {
-            self.lock.raw().unlock_shared();
+    fn release_read(&self) -> PyResult<()> {
+        let tid = std::thread::current().id();
+        let mut counts = self.raw_read_counts.lock();
+        match counts.get_mut(&tid) {
+            Some(count) if *count > 0 => {
+                *count -= 1;
+                if let Some(reg_count) = self.reader_registry.lock().get_mut(&tid) {
+                    if *reg_count > 0 {
+                        *reg_count -= 1;
+                    }
+                }
+                unsafe {
+                    self.lock.raw().unlock_shared();
+                }
+                Ok(())
+            }
+            _ => Err(PyRuntimeError::new_err("Cannot release read lock: lock was not acquired by current thread")),
         }
     }
 
     /// Try direct read lock acquisition without blocking.
     fn try_acquire_read(&self) -> bool {
-        unsafe { self.lock.raw().try_lock_shared() }
+        if unsafe { self.lock.raw().try_lock_shared() } {
+            let tid = std::thread::current().id();
+            *self.raw_read_counts.lock().entry(tid).or_insert(0) += 1;
+            *self.reader_registry.lock().entry(tid).or_insert(0) += 1;
+            true
+        } else {
+            false
+        }
     }
 
     /// Direct write lock acquisition (zero Python object allocation).
     fn acquire_write(&self, py: Python<'_>) {
         let lock = self.lock.clone();
+        let tid = std::thread::current().id();
         py.detach(|| {
             unsafe {
                 lock.raw().lock_exclusive();
             }
         });
+        *self.raw_write_owners.lock().entry(tid).or_insert(0) += 1;
     }
 
     /// Direct write lock release.
-    fn release_write(&self) {
-        unsafe {
-            self.lock.raw().unlock_exclusive();
+    fn release_write(&self) -> PyResult<()> {
+        let tid = std::thread::current().id();
+        let mut owners = self.raw_write_owners.lock();
+        match owners.get_mut(&tid) {
+            Some(count) if *count > 0 => {
+                *count -= 1;
+                unsafe {
+                    self.lock.raw().unlock_exclusive();
+                }
+                Ok(())
+            }
+            _ => Err(PyRuntimeError::new_err("Cannot release write lock: lock was not acquired by current thread")),
         }
     }
 
     /// Try direct write lock acquisition without blocking.
     fn try_acquire_write(&self) -> bool {
-        unsafe { self.lock.raw().try_lock_exclusive() }
+        if unsafe { self.lock.raw().try_lock_exclusive() } {
+            let tid = std::thread::current().id();
+            *self.raw_write_owners.lock().entry(tid).or_insert(0) += 1;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -133,7 +171,7 @@ impl RwLock {
 impl RwLockReadGuard {
     /// Enter the read lock context.
     ///
-    /// Acquisition strategy (BUG-6 fix):
+    /// Acquisition strategy:
     /// - If this thread already holds a read lock on this RwLock instance,
     ///   use the *recursive* API so we don't deadlock against a waiting writer.
     /// - Otherwise use the *non-recursive* API so the writer-preference queue
