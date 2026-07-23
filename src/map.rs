@@ -104,6 +104,66 @@ impl ConcurrentMap {
         Ok((false, py.None()))
     }
 
+    /// Atomically get the existing value for key, or insert default and return default if absent.
+    fn get_or_insert(&self, py: Python<'_>, key: Bound<'_, PyAny>, default: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        check_hashable(py, &key)?;
+        let h = key.hash()? as u64;
+        let idx = (h as usize) % self.shards.len();
+        let pykey = key.clone().unbind();
+
+        let mut checked_keys: Vec<Py<PyAny>> = Vec::new();
+
+        loop {
+            // 1. Collect candidate keys under shard lock that haven't been checked yet
+            let new_candidates = {
+                let shard = self.shards[idx].lock();
+                if let Some(list) = shard.get(&h) {
+                    list.iter()
+                        .filter_map(|(k, v)| {
+                            if checked_keys.iter().any(|ck| ck.is(k)) {
+                                None
+                            } else {
+                                Some((k.clone_ref(py), v.clone_ref(py)))
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                }
+            };
+
+            // 2. Perform Python equality checks OUTSIDE the lock
+            for (k, v) in new_candidates {
+                if k.bind(py).eq(&key)? {
+                    return Ok(v);
+                }
+                checked_keys.push(k);
+            }
+
+            // 3. Re-lock shard and attempt insertion if no new candidates appeared
+            let mut shard = self.shards[idx].lock();
+            let list = shard.entry(h).or_insert_with(Vec::new);
+
+            // Check if any candidate exists in list that hasn't been checked for equality
+            let has_unbound_candidate = list.iter().any(|(k, _)| !checked_keys.iter().any(|ck| ck.is(k)));
+
+            if has_unbound_candidate {
+                // Another thread inserted an item under hash `h` while lock was released!
+                // Retry loop to evaluate the new candidate outside lock.
+                continue;
+            }
+
+            // Fallback pointer identity check
+            if let Some(pos) = list.iter().position(|(k, _)| k.is(&pykey)) {
+                return Ok(list[pos].1.clone_ref(py));
+            }
+
+            // Atomically insert key and default value
+            list.push((pykey.clone_ref(py), default.clone_ref(py)));
+            return Ok(default);
+        }
+    }
+
     /// Set the value for the key.
     fn set(&self, py: Python<'_>, key: Bound<'_, PyAny>, value: Py<PyAny>) -> PyResult<()> {
         check_hashable(py, &key)?;
