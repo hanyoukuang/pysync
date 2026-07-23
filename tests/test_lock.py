@@ -183,3 +183,31 @@ def test_rwlock_recursive_read():
         # Acquire a second read lock recursively on the same thread
         with lock.read():
             pass
+
+
+def test_rwlock_raw_apis_removed():
+    """Verify raw acquire/release methods are removed in favor of context managers."""
+    lock = RwLock()
+    assert not hasattr(lock, "acquire_read")
+    assert not hasattr(lock, "release_read")
+    assert not hasattr(lock, "acquire_write")
+    assert not hasattr(lock, "release_write")
+
+
+def test_rwlock_interleaved_recursive_reads():
+    """Verify interleaved recursive read lock acquisition across multiple locks."""
+    lock1 = RwLock()
+    lock2 = RwLock()
+
+    g1 = lock1.read()
+    g1.__enter__()
+
+    g2 = lock2.read()
+    g2.__enter__()
+    g2.__exit__(None, None, None)
+
+    g3 = lock1.read()
+    g3.__enter__()
+    g3.__exit__(None, None, None)
+
+    g1.__exit__(None, None, None)

@@ -546,3 +546,67 @@ def test_select_nonblocking_zero_timeout():
     with pytest.raises(TimeoutError):
         select([ch.recv_op()], timeout=0.0)
 
+
+def test_channel_send_item_gc_on_close():
+    """Verify item sent is properly garbage collected when interrupted by close."""
+    import weakref
+    import gc
+    deleted = []
+
+    class Tracked:
+        def __del__(self):
+            deleted.append("gone")
+
+    ch = Channel(capacity=1)
+    ch.send("blocker")
+
+    obj = Tracked()
+    ref = weakref.ref(obj)
+
+    def close_channel():
+        time.sleep(0.05)
+        ch.close()
+
+    t = threading.Thread(target=close_channel)
+    t.start()
+
+    with pytest.raises(ValueError, match="closed"):
+        ch.send(obj, timeout=1.0)
+
+    t.join()
+    del obj
+    gc.collect()
+
+    assert ref() is None
+    assert "gone" in deleted
+
+
+def test_channel_recv_op_drain_support():
+    """Verify recv_op() supports draining buffered items after channel close."""
+    ch = Channel(capacity=5)
+    ch.send("data")
+    ch.close()
+
+    with pytest.raises(ValueError, match="closed"):
+        ch.send_op("more")
+
+    op = ch.recv_op()
+    assert op is not None
+
+
+def test_select_duplicate_channel_ops():
+    """Verify select() handles duplicate ops on the same channel safely."""
+    ch = Channel()
+    ch_other = Channel()
+
+    ch.send("hello")
+    idx, val = select([ch.recv_op(), ch.recv_op(), ch_other.recv_op()], timeout=2.0)
+    assert val == "hello"
+    assert idx in (0, 1)
+
+    with pytest.raises(TimeoutError):
+        select([ch.recv_op(), ch.recv_op(), ch_other.recv_op()], timeout=0.1)
+
+    ch.close()
+    ch_other.close()
+

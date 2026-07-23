@@ -204,34 +204,8 @@ def benchmark_rwlock(readers_count=8, writers_count=2, ops=50000):
     for t in threads: t.start()
     for t in threads: t.join()
     rw_time = time.time() - start
-    print(f"pysync.RwLock (Context Guard) Time: {rw_time:.4f} seconds")
-
-    # RwLock (Direct Zero-Allocation API)
-    rwlock_direct = RwLock()
-    shared_state = [0]
-    start = time.time()
-    def rw_direct_reader():
-        for _ in range(ops):
-            rwlock_direct.acquire_read()
-            val = shared_state[0]
-            rwlock_direct.release_read()
-
-    def rw_direct_writer():
-        for _ in range(ops // 10):
-            rwlock_direct.acquire_write()
-            shared_state[0] += 1
-            rwlock_direct.release_write()
-
-    threads = []
-    for _ in range(readers_count):
-        threads.append(threading.Thread(target=rw_direct_reader))
-    for _ in range(writers_count):
-        threads.append(threading.Thread(target=rw_direct_writer))
-
-    for t in threads: t.start()
-    for t in threads: t.join()
-    direct_time = time.time() - start
-    print(f"pysync.RwLock (Direct Zero-Alloc) Time: {direct_time:.4f} seconds ({std_time / direct_time:.2f}x vs std_lock)")
+    print(f"pysync.RwLock Time: {rw_time:.4f} seconds")
+    print(f"Speedup over RLock: {std_time / rw_time:.2f}x")
 
 # 6. Benchmark Actor vs Lock-Based Counter
 def benchmark_actor(ops=50000, num_threads=4):

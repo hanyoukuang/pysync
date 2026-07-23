@@ -3,7 +3,7 @@ use pyo3::prelude::*;
 use pyo3::{Py, PyAny};
 use crossbeam_channel::{
     Sender, Receiver, bounded, unbounded,
-    RecvTimeoutError, TrySendError, TryRecvError
+    TrySendError, TryRecvError
 };
 use std::time::Duration;
 use parking_lot::{RwLock, Mutex};
@@ -11,7 +11,6 @@ use parking_lot::{RwLock, Mutex};
 /// A thread-safe, lock-free message passing channel based on Rust's crossbeam-channel.
 /// Supports bounded, unbounded, and unbuffered (capacity=0) rendezvous modes.
 #[pyclass]
-#[repr(align(64))]
 pub struct Channel {
     sender: RwLock<Option<Sender<Py<PyAny>>>>,
     receiver: RwLock<Option<Receiver<Py<PyAny>>>>,
@@ -30,25 +29,24 @@ impl Channel {
                 return Err(PyValueError::new_err("Capacity must be non-negative"));
             }
         }
-        let cap_usize = capacity.map(|cap| cap as usize);
-        
-        let (s, r) = match cap_usize {
-            Some(cap) => bounded(cap),
-            _ => unbounded(),
+
+        let (tx, rx) = match capacity {
+            None => unbounded(),
+            Some(cap) => bounded(cap as usize),
         };
 
-        let (close_tx, close_rx) = bounded::<()>(0);
-        
+        let (close_tx, close_rx) = bounded(0);
+
         Ok(Channel {
-            sender: RwLock::new(Some(s)),
-            receiver: RwLock::new(Some(r)),
+            sender: RwLock::new(Some(tx)),
+            receiver: RwLock::new(Some(rx)),
             close_tx: Mutex::new(Some(close_tx)),
             close_rx,
-            capacity: cap_usize,
+            capacity: capacity.map(|c| c as usize),
         })
     }
 
-    /// Block and send an item to the channel with optional timeout. Releases the GIL.
+    /// Block and send an item into the channel. Releases the GIL while waiting.
     #[pyo3(signature = (item, timeout=None))]
     fn send(&self, py: Python<'_>, item: Py<PyAny>, timeout: Option<f64>) -> PyResult<()> {
         let sender = {
@@ -56,8 +54,23 @@ impl Channel {
             guard.clone().ok_or_else(|| PyValueError::new_err("Channel is closed"))?
         };
 
+        let mut item = item;
+        if timeout.is_none() {
+            match sender.try_send(item) {
+                Ok(()) => return Ok(()),
+                Err(TrySendError::Full(returned_item)) => {
+                    item = returned_item;
+                }
+                Err(TrySendError::Disconnected(_returned_item)) => {
+                    // _returned_item is returned by crossbeam when the channel is disconnected.
+                    // Dropping the returned item on a disconnected channel is consistent with close() semantics.
+                    return Err(PyValueError::new_err("Channel is closed"));
+                }
+            }
+        }
+
         let close_rx = self.close_rx.clone();
-        
+
         if let Some(t) = timeout {
             if t < 0.0 {
                 return Err(PyValueError::new_err("Timeout must be non-negative"));
@@ -71,7 +84,7 @@ impl Channel {
                         Err(_) => Err(PyValueError::new_err("Channel is closed")),
                     },
                     recv(close_rx) -> _ => Err(PyValueError::new_err("Channel is closed")),
-                    recv(timeout_rx) -> _ => Err(PyTimeoutError::new_err("Send operation timed out")),
+                    recv(timeout_rx) -> _ => Err(PyTimeoutError::new_err("send() timed out waiting for channel capacity")),
                 }
             })
         } else {
@@ -87,60 +100,85 @@ impl Channel {
         }
     }
 
-    /// Block and receive an item from the channel with optional timeout. Releases the GIL.
+    /// Block and receive an item from the channel. Releases the GIL while waiting.
+    ///
+    /// # Concurrency & Closing Behavior
+    /// When multiple worker threads are blocked on `recv()` when `close()` is called,
+    /// all threads are unblocked simultaneously. Any buffered items in the channel
+    /// are drained by the unblocked threads until empty. Threads calling `recv()` after
+    /// the buffer is drained will receive `PyValueError("Channel is closed and empty")`.
     #[pyo3(signature = (timeout=None))]
     fn recv(&self, py: Python<'_>, timeout: Option<f64>) -> PyResult<Py<PyAny>> {
         let receiver = {
             let guard = self.receiver.read();
             guard.clone().ok_or_else(|| PyValueError::new_err("Channel is closed"))?
         };
-        
+
+        if timeout.is_none() {
+            if let Ok(item) = receiver.try_recv() {
+                return Ok(item);
+            }
+        }
+
+        let close_rx = self.close_rx.clone();
+
         if let Some(t) = timeout {
             if t < 0.0 {
                 return Err(PyValueError::new_err("Timeout must be non-negative"));
             }
             let duration = Duration::from_secs_f64(t);
-            let res = py.detach(|| {
-                receiver.recv_timeout(duration)
-            });
-            match res {
-                Ok(item) => Ok(item),
-                Err(RecvTimeoutError::Timeout) => Err(PyTimeoutError::new_err("Receive operation timed out")),
-                Err(RecvTimeoutError::Disconnected) => Err(PyValueError::new_err("Channel is closed and empty")),
-            }
+            py.detach(|| {
+                let timeout_rx = crossbeam_channel::after(duration);
+                crossbeam_channel::select! {
+                    recv(receiver) -> res => match res {
+                        Ok(item) => Ok(item),
+                        Err(_) => Err(PyValueError::new_err("Channel is closed and empty")),
+                    },
+                    recv(close_rx) -> _ => {
+                        if let Ok(item) = receiver.try_recv() {
+                            return Ok(item);
+                        }
+                        Err(PyValueError::new_err("Channel is closed and empty"))
+                    },
+                    recv(timeout_rx) -> _ => Err(PyTimeoutError::new_err("recv() timed out waiting for available item")),
+                }
+            })
         } else {
-            let res = py.detach(|| {
-                receiver.recv()
-            });
-            match res {
-                Ok(item) => Ok(item),
-                Err(_) => Err(PyValueError::new_err("Channel is closed and empty")),
-            }
+            py.detach(|| {
+                crossbeam_channel::select! {
+                    recv(receiver) -> res => match res {
+                        Ok(item) => Ok(item),
+                        Err(_) => Err(PyValueError::new_err("Channel is closed and empty")),
+                    },
+                    recv(close_rx) -> _ => {
+                        if let Ok(item) = receiver.try_recv() {
+                            return Ok(item);
+                        }
+                        Err(PyValueError::new_err("Channel is closed and empty"))
+                    },
+                }
+            })
         }
     }
 
-    /// Attempt to send an item immediately without blocking.
+    /// Non-blocking send. Raises RuntimeError if full, ValueError if closed.
     fn try_send(&self, item: Py<PyAny>) -> PyResult<()> {
-        let sender = {
-            let guard = self.sender.read();
-            guard.clone().ok_or_else(|| PyValueError::new_err("Channel is closed"))?
-        };
-        
-        match sender.try_send(item) {
+        let guard = self.sender.read();
+        let tx = guard.as_ref().ok_or_else(|| PyValueError::new_err("Channel is closed"))?;
+
+        match tx.try_send(item) {
             Ok(_) => Ok(()),
             Err(TrySendError::Full(_)) => Err(PyRuntimeError::new_err("Channel is full")),
             Err(TrySendError::Disconnected(_)) => Err(PyValueError::new_err("Channel is closed")),
         }
     }
 
-    /// Attempt to receive an item immediately without blocking.
+    /// Non-blocking receive. Raises RuntimeError if empty, ValueError if closed.
     fn try_recv(&self) -> PyResult<Py<PyAny>> {
-        let receiver = {
-            let guard = self.receiver.read();
-            guard.clone().ok_or_else(|| PyValueError::new_err("Channel is closed"))?
-        };
-        
-        match receiver.try_recv() {
+        let guard = self.receiver.read();
+        let rx = guard.as_ref().ok_or_else(|| PyValueError::new_err("Channel is closed"))?;
+
+        match rx.try_recv() {
             Ok(item) => Ok(item),
             Err(TryRecvError::Empty) => Err(PyRuntimeError::new_err("Channel is empty")),
             Err(TryRecvError::Disconnected) => Err(PyValueError::new_err("Channel is closed and empty")),
@@ -157,13 +195,15 @@ impl Channel {
         self.recv(py, Some(timeout))
     }
 
-    /// Close the channel by setting is_closed and dropping the close signal, unblocking all pending operations.
+    /// Close the channel for sending. Drops sender and unblocks pending receivers.
+    /// Note: Receiver remains active to allow draining any remaining buffered items.
     fn close(&self) {
         *self.sender.write() = None;
         *self.close_tx.lock() = None;
     }
 
     /// Create a Receive Operation wrapper for `select()`.
+    /// Remains available after `close()` to allow draining existing items in the channel buffer.
     fn recv_op(&self) -> PyResult<RecvOp> {
         let guard = self.receiver.read();
         let rx = guard.clone().ok_or_else(|| PyValueError::new_err("Channel is closed"))?;
@@ -196,7 +236,19 @@ impl Channel {
     fn __next__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         match self.recv(py, None) {
             Ok(val) => Ok(val),
-            Err(_) => Err(pyo3::exceptions::PyStopIteration::new_err(())),
+            Err(err) => {
+                let is_closed_and_empty = {
+                    let rx_guard = self.receiver.read();
+                    let is_closed = self.sender.read().is_none();
+                    let is_empty = rx_guard.as_ref().map_or(true, |rx| rx.is_empty());
+                    is_closed && is_empty
+                };
+                if is_closed_and_empty {
+                    Err(pyo3::exceptions::PyStopIteration::new_err(()))
+                } else {
+                    Err(err)
+                }
+            }
         }
     }
 

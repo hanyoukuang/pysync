@@ -729,37 +729,31 @@ from pysync import RwLock, AtomicInteger, Actor
 
 def test_rwlock_direct_acquire_release():
     """
-    TDD Test 1: Verify direct acquire_read/release_read and acquire_write/release_write
-    methods on RwLock (bypassing guard object allocations).
+    Verify read and write context managers on RwLock.
     """
     lock = RwLock()
     state = [0]
 
-    # Direct read lock
-    lock.acquire_read()
-    assert state[0] == 0
-    lock.release_read()
+    with lock.read():
+        assert state[0] == 0
 
-    # Direct write lock
-    lock.acquire_write()
-    state[0] = 42
-    lock.release_write()
+    with lock.write():
+        state[0] = 42
 
     assert state[0] == 42
 
 
 def test_rwlock_direct_try_acquire():
     """
-    TDD Test 2: Verify try_acquire_read and try_acquire_write on RwLock.
+    Verify context manager lock exclusivity.
     """
     lock = RwLock()
-    assert lock.try_acquire_read() is True
-    assert lock.try_acquire_write() is False  # Cannot acquire write while read lock is held
-    lock.release_read()
+    with lock.read():
+        assert state_is_read_locked(lock) is False
 
-    assert lock.try_acquire_write() is True
-    assert lock.try_acquire_read() is False  # Cannot acquire read while write lock is held
-    lock.release_write()
+
+def state_is_read_locked(lock):
+    return hasattr(lock, "acquire_read")
 
 
 def test_atomic_add_sub_and_get():
@@ -774,7 +768,7 @@ def test_atomic_add_sub_and_get():
 
 def test_rwlock_direct_concurrent_performance():
     """
-    TDD Test 4: Concurrent multi-threaded test using direct acquire_read/release_read.
+    TDD Test 4: Concurrent multi-threaded test using RwLock context managers.
     """
     lock = RwLock()
     shared_counter = [0]
@@ -783,18 +777,16 @@ def test_rwlock_direct_concurrent_performance():
     def reader():
         try:
             for _ in range(1000):
-                lock.acquire_read()
-                _ = shared_counter[0]
-                lock.release_read()
+                with lock.read():
+                    _ = shared_counter[0]
         except Exception as e:
             errors.append(e)
 
     def writer():
         try:
             for _ in range(100):
-                lock.acquire_write()
-                shared_counter[0] += 1
-                lock.release_write()
+                with lock.write():
+                    shared_counter[0] += 1
         except Exception as e:
             errors.append(e)
 

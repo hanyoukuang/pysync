@@ -12,6 +12,14 @@ fn parse_ordering(ordering: Option<&str>) -> PyResult<Ordering> {
     }
 }
 
+fn derive_failure_ordering(ord: Ordering) -> Ordering {
+    match ord {
+        Ordering::Release => Ordering::Relaxed,
+        Ordering::AcqRel => Ordering::Acquire,
+        other => other,
+    }
+}
+
 /// A thread-safe, lock-free 64-bit signed integer using CPU atomic operations.
 /// All methods use Ordering::SeqCst by default to guarantee sequential consistency across all threads.
 /// Accepts optional ordering="relaxed" or shortcut methods like increment_relaxed() for maximum performance on ARM64.
@@ -130,11 +138,12 @@ impl AtomicInteger {
     #[pyo3(signature = (expected, new_value, ordering=None))]
     fn compare_and_set(&self, expected: i64, new_value: i64, ordering: Option<&str>) -> PyResult<bool> {
         let ord = parse_ordering(ordering)?;
+        let fail_ord = derive_failure_ordering(ord);
         Ok(self.value.compare_exchange(
             expected,
             new_value,
             ord,
-            ord
+            fail_ord
         ).is_ok())
     }
 
@@ -190,11 +199,12 @@ impl AtomicBoolean {
     #[pyo3(signature = (expected, new_value, ordering=None))]
     fn compare_and_set(&self, expected: bool, new_value: bool, ordering: Option<&str>) -> PyResult<bool> {
         let ord = parse_ordering(ordering)?;
+        let fail_ord = derive_failure_ordering(ord);
         Ok(self.value.compare_exchange(
             expected,
             new_value,
             ord,
-            ord
+            fail_ord
         ).is_ok())
     }
 
