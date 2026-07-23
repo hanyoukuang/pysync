@@ -98,7 +98,7 @@ class Actor:
             if object.__getattribute__(self, '_thread') is not None:
                 return
 
-            thread = threading.Thread(target=self._run_loop, name=f"Actor-{type(self).__name__}")
+            thread = threading.Thread(target=self._run_loop, name=f"Actor-{type(self).__name__}", daemon=True)
             object.__setattr__(self, '_thread', thread)
             thread.start()
 

@@ -185,13 +185,6 @@ impl ThreadPool {
                     let _ = handle.join();
                 }
             });
-        } else if !workers.is_empty() {
-            // When wait is false, spawn a background helper thread to join workers cleanly
-            std::thread::spawn(move || {
-                for handle in workers {
-                    let _ = handle.join();
-                }
-            });
         }
     }
 }
@@ -208,10 +201,7 @@ impl Drop for ThreadPool {
         // Drops the sender, causing receivers to exit once queue is drained
         self.sender = None;
 
-        // Take workers and join them cleanly
-        let workers = std::mem::take(&mut self.workers);
-        for handle in workers {
-            let _ = handle.join();
-        }
+        // Drop worker join handles without blocking interpreter shutdown
+        self.workers.clear();
     }
 }
