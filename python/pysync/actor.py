@@ -196,17 +196,22 @@ class Actor:
             def async_prop_get():
                 future: Future[Any] = Future()
                 try:
-                    try:
-                        stopped = object.__getattribute__(self, '_stopped')
-                    except AttributeError:
-                        stopped = False
-
-                    if stopped:
+                    if object.__getattribute__(self, '_stopped'):
                         future.set_exception(RuntimeError("Actor is stopped"))
-                    else:
-                        object.__getattribute__(self, '_mailbox').send((name, (), {}, future))
+                        return future
+
+                    object.__getattribute__(self, '_mailbox').send((name, (), {}, future))
+
+                    if object.__getattribute__(self, '_stopped'):
+                        try:
+                            thread = object.__getattribute__(self, '_thread')
+                            if thread is not None and not thread.is_alive() and not future.done():
+                                future.set_exception(RuntimeError("Actor is stopped"))
+                        except AttributeError:
+                            pass
                 except (ValueError, RuntimeError) as err:
-                    future.set_exception(RuntimeError(f"Actor is stopped: {err}"))
+                    if not future.done():
+                        future.set_exception(RuntimeError(f"Actor is stopped: {err}"))
                 return future
             return async_prop_get()
 
@@ -220,17 +225,22 @@ class Actor:
             def async_call(*args, **kwargs):
                 future: Future[Any] = Future()
                 try:
-                    try:
-                        stopped = object.__getattribute__(self, '_stopped')
-                    except AttributeError:
-                        stopped = False
-
-                    if stopped:
+                    if object.__getattribute__(self, '_stopped'):
                         future.set_exception(RuntimeError("Actor is stopped"))
-                    else:
-                        object.__getattribute__(self, '_mailbox').send((name, args, kwargs, future))
+                        return future
+
+                    object.__getattribute__(self, '_mailbox').send((name, args, kwargs, future))
+
+                    if object.__getattribute__(self, '_stopped'):
+                        try:
+                            thread = object.__getattribute__(self, '_thread')
+                            if thread is not None and not thread.is_alive() and not future.done():
+                                future.set_exception(RuntimeError("Actor is stopped"))
+                        except AttributeError:
+                            pass
                 except (ValueError, RuntimeError) as err:
-                    future.set_exception(RuntimeError(f"Actor is stopped: {err}"))
+                    if not future.done():
+                        future.set_exception(RuntimeError(f"Actor is stopped: {err}"))
                 return future
             return async_call
 
@@ -303,6 +313,10 @@ class Actor:
             current_thread = threading.current_thread()
             if current_thread != thread:
                 thread.join(timeout=timeout)
+            try:
+                object.__getattribute__(self, '_mailbox').close()
+            except Exception:
+                pass
 
     def __del__(self):
         try:
