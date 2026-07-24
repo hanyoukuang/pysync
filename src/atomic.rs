@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use std::sync::atomic::{AtomicI64, AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 fn parse_ordering(ordering: Option<&str>) -> PyResult<Ordering> {
     match ordering {
@@ -8,7 +8,10 @@ fn parse_ordering(ordering: Option<&str>) -> PyResult<Ordering> {
         Some("acquire") | Some("Acquire") => Ok(Ordering::Acquire),
         Some("release") | Some("Release") => Ok(Ordering::Release),
         Some("acq_rel") | Some("AcqRel") => Ok(Ordering::AcqRel),
-        Some(other) => Err(pyo3::exceptions::PyValueError::new_err(format!("Unsupported memory ordering: {}", other))),
+        Some(other) => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Unsupported memory ordering: {}",
+            other
+        ))),
     }
 }
 
@@ -24,7 +27,6 @@ fn derive_failure_ordering(ord: Ordering) -> Ordering {
 /// All methods use Ordering::SeqCst by default to guarantee sequential consistency across all threads.
 /// Accepts optional ordering="relaxed" or shortcut methods like increment_relaxed() for maximum performance on ARM64.
 #[pyclass]
-#[repr(align(64))]
 pub struct AtomicInteger {
     value: AtomicI64,
 }
@@ -75,7 +77,9 @@ impl AtomicInteger {
 
     /// Fast-path relaxed add_and_get.
     fn add_and_get_relaxed(&self, delta: i64) -> i64 {
-        self.value.fetch_add(delta, Ordering::Relaxed).wrapping_add(delta)
+        self.value
+            .fetch_add(delta, Ordering::Relaxed)
+            .wrapping_add(delta)
     }
 
     /// Atomically subtract delta from the value and return the OLD value.
@@ -99,7 +103,9 @@ impl AtomicInteger {
 
     /// Fast-path relaxed sub_and_get.
     fn sub_and_get_relaxed(&self, delta: i64) -> i64 {
-        self.value.fetch_sub(delta, Ordering::Relaxed).wrapping_sub(delta)
+        self.value
+            .fetch_sub(delta, Ordering::Relaxed)
+            .wrapping_sub(delta)
     }
 
     /// Atomically increment the value by 1 and return the NEW value.
@@ -136,15 +142,18 @@ impl AtomicInteger {
     /// Atomically compare the current value to expected, and if equal, swap with new_value.
     /// Returns True if the swap succeeded, otherwise False.
     #[pyo3(signature = (expected, new_value, ordering=None))]
-    fn compare_and_set(&self, expected: i64, new_value: i64, ordering: Option<&str>) -> PyResult<bool> {
+    fn compare_and_set(
+        &self,
+        expected: i64,
+        new_value: i64,
+        ordering: Option<&str>,
+    ) -> PyResult<bool> {
         let ord = parse_ordering(ordering)?;
         let fail_ord = derive_failure_ordering(ord);
-        Ok(self.value.compare_exchange(
-            expected,
-            new_value,
-            ord,
-            fail_ord
-        ).is_ok())
+        Ok(self
+            .value
+            .compare_exchange(expected, new_value, ord, fail_ord)
+            .is_ok())
     }
 
     fn __repr__(&self) -> String {
@@ -158,7 +167,6 @@ impl AtomicInteger {
 
 /// A thread-safe, lock-free boolean variable using CPU atomic operations.
 #[pyclass]
-#[repr(align(64))]
 pub struct AtomicBoolean {
     value: AtomicBool,
 }
@@ -197,22 +205,37 @@ impl AtomicBoolean {
 
     /// Atomically compare the current value to expected, and if equal, swap with new_value.
     #[pyo3(signature = (expected, new_value, ordering=None))]
-    fn compare_and_set(&self, expected: bool, new_value: bool, ordering: Option<&str>) -> PyResult<bool> {
+    fn compare_and_set(
+        &self,
+        expected: bool,
+        new_value: bool,
+        ordering: Option<&str>,
+    ) -> PyResult<bool> {
         let ord = parse_ordering(ordering)?;
         let fail_ord = derive_failure_ordering(ord);
-        Ok(self.value.compare_exchange(
-            expected,
-            new_value,
-            ord,
-            fail_ord
-        ).is_ok())
+        Ok(self
+            .value
+            .compare_exchange(expected, new_value, ord, fail_ord)
+            .is_ok())
     }
 
     fn __repr__(&self) -> String {
-        format!("AtomicBoolean({})", if self.value.load(Ordering::SeqCst) { "True" } else { "False" })
+        format!(
+            "AtomicBoolean({})",
+            if self.value.load(Ordering::SeqCst) {
+                "True"
+            } else {
+                "False"
+            }
+        )
     }
 
     fn __str__(&self) -> String {
-        format!("{}", if self.value.load(Ordering::SeqCst) { "True" } else { "False" })
+        (if self.value.load(Ordering::SeqCst) {
+            "True"
+        } else {
+            "False"
+        })
+        .to_string()
     }
 }

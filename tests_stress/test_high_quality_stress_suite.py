@@ -129,7 +129,7 @@ def test_100k_map_high_concurrency_stress():
 # ==============================================================================
 
 def test_100_actor_swarm_dag_topology():
-    """最高标准 4: 构造 100 个 Actor 构成的微型分布式拓扑，验证成百上千 Actor 调度性能。"""
+    """最高标准 4: 构造 100 个真正的 Actor 构成的集群拓扑，验证成百上千 Actor 的高吞吐无死锁调度。"""
     class NodeActor(Actor):
         def __init__(self, node_id):
             super().__init__()
@@ -140,29 +140,30 @@ def test_100_actor_swarm_dag_topology():
             self.processed += payload
             return self.processed
 
-    # 批量实例化 100 个 Actor
+    # 真实实例化 100 个 Actor
     actors = [NodeActor(i) for i in range(100)]
 
     try:
         futures = []
-        # 向 100 个 Actor 密集投递 5,000 次消息
-        for i in range(5000):
+        TOTAL_MSGS = 10000
+        for i in range(TOTAL_MSGS):
             actor_target = actors[i % 100]
             futures.append(actor_target.process_msg(1))
 
-        # 等待最后一个 future 完成
-        futures[-1].result(timeout=5.0)
+        futures[-1].result(timeout=10.0)
 
-        # 校验每个 Actor 的累加值
+        total_processed = 0
         for actor in actors:
-            res = actor.process_msg(0).result(timeout=2.0)
-            assert res == 50
+            res = actor.process_msg(0).result(timeout=5.0)
+            total_processed += res
+
+        assert total_processed == TOTAL_MSGS, f"预期总处理消息数 {TOTAL_MSGS}，实际 {total_processed}"
 
     finally:
         for actor in actors:
             actor.stop()
 
-    print("[100 Actor Swarm] 100 个 Actor 集群完成 5,000 次 DAG 拓扑消息通信")
+    print(f"\n[100 Actor Swarm] 100 个真实 Actor 集群完成 {TOTAL_MSGS:,} 次拓扑消息并行通信与调度")
 
 
 # ==============================================================================

@@ -1,19 +1,6 @@
 import time
 import threading
-import gc
-import sys
-import queue
 import pytest
-import pysync
-from pysync import Channel, ConcurrentDict, RwLock, AtomicInteger, AtomicBoolean, ThreadPool, ThreadGroup, Actor
-
-
-# ============================================================================
-# From test_map.py
-# ============================================================================
-import time
-import pytest
-import threading
 from pysync import ConcurrentMap, ConcurrentDict
 
 # ==========================================
@@ -100,8 +87,8 @@ def test_map_concurrent_access():
         t.start()
         
     for t in threads:
-        t.join()
-        
+        t.join(timeout=5.0)
+
     assert len(d) == 400
     for i in range(400):
         assert d[f"key_{i}"] == i
@@ -535,5 +522,197 @@ def test_map_len_is_approximate_under_concurrency():
 
     unique_lens = set(len_values)
     assert len(unique_lens) > 1
+
+
+def test_map_set_delete_pop_under_high_collision_and_contention():
+    """Verify set(), delete(), pop_val() finish cleanly under hash collision and high contention."""
+    class CollisionKey:
+        __slots__ = ('uid',)
+        def __init__(self, uid: int):
+            self.uid = uid
+        def __hash__(self):
+            return 42
+        def __eq__(self, other):
+            return isinstance(other, CollisionKey) and self.uid == other.uid
+
+    m = ConcurrentMap(shard_count=1)
+    barrier = threading.Barrier(6, timeout=10.0)
+    stop = threading.Event()
+    errors = []
+    error_lock = threading.Lock()
+
+    def setter(tid):
+        barrier.wait()
+        for i in range(50):
+            if stop.is_set(): break
+            try:
+                m.set(CollisionKey(tid * 1000 + i), i)
+            except Exception as e:
+                with error_lock: errors.append(e)
+
+    def deleter(tid):
+        barrier.wait()
+        for i in range(50):
+            if stop.is_set(): break
+            try:
+                m.delete(CollisionKey(tid * 1000 + i))
+            except Exception as e:
+                with error_lock: errors.append(e)
+
+    def popper(tid):
+        barrier.wait()
+        for i in range(50):
+            if stop.is_set(): break
+            try:
+                m.pop_val(CollisionKey(tid * 1000 + i))
+            except Exception as e:
+                with error_lock: errors.append(e)
+
+    threads = []
+    for t in range(2): threads.append(threading.Thread(target=setter, args=(t,)))
+    for t in range(2): threads.append(threading.Thread(target=deleter, args=(t,)))
+    for t in range(2): threads.append(threading.Thread(target=popper, args=(t,)))
+
+    for t in threads: t.start()
+    for t in threads: t.join(timeout=5.0)
+
+    stop.set()
+    assert not errors, f"操作中产生非预期异常: {errors}"
+
+
+def test_map_get_returns_weak_consistency_snapshot():
+    """Verify ConcurrentMap.get() returns weak consistency snapshot under high concurrency."""
+    m = ConcurrentMap(shard_count=1)
+
+    class SlowEqKey:
+        def __init__(self, val):
+            self.val = val
+
+        def __hash__(self):
+            return hash(self.val)
+
+        def __eq__(self, other):
+            if isinstance(other, SlowEqKey):
+                time.sleep(0.001)
+                return self.val == other.val
+            return False
+
+    k = SlowEqKey(42)
+    m.set(k, "hello")
+
+    results = []
+
+    def reader():
+        for _ in range(20):
+            val = m.get(SlowEqKey(42))
+            results.append(val)
+
+    def modifier():
+        for _ in range(20):
+            m.set(SlowEqKey(42), "world")
+            m.set(SlowEqKey(42), "hello")
+
+    threads = [threading.Thread(target=reader), threading.Thread(target=modifier)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+
+    valid = {"hello", "world", None}
+    invalid = [r for r in results if r not in valid]
+    assert not invalid, f"get() 返回意外值: {invalid}"
+
+
+def test_concurrent_dict_update_races_with_deletion():
+    """Verify ConcurrentDict.update() races with deletion without KeyError."""
+    from pysync import ConcurrentDict
+
+    for trial in range(10):
+        d1 = ConcurrentDict()
+        d2 = ConcurrentDict()
+
+        for i in range(100):
+            d1[f"k{i}"] = i
+
+        error_holder = []
+        barrier = threading.Barrier(2, timeout=3.0)
+
+        def updater():
+            barrier.wait()
+            try:
+                d2.update(d1)
+            except KeyError as e:
+                error_holder.append(str(e))
+
+        def deleter():
+            barrier.wait()
+            for i in range(100):
+                try:
+                    del d1[f"k{i}"]
+                except KeyError:
+                    pass
+
+        t_up = threading.Thread(target=updater)
+        t_del = threading.Thread(target=deleter)
+        t_up.start()
+        t_del.start()
+        t_up.join(timeout=3.0)
+        t_del.join(timeout=3.0)
+        assert not error_holder, f"update() 失败: {error_holder}"
+
+
+def test_map_no_eq_inside_lock_no_deadlock():
+    """Verify ConcurrentMap does not deadlock under high contention and executes __eq__ outside shard lock."""
+    m = ConcurrentMap(shard_count=1)
+
+    concurrent_count = 0
+    max_concurrent = 0
+    count_lock = threading.Lock()
+
+    class CollisionKey:
+        __slots__ = ('uid',)
+        def __init__(self, uid: int):
+            self.uid = uid
+
+        def __hash__(self):
+            return 42
+
+        def __eq__(self, other):
+            if not isinstance(other, CollisionKey):
+                return False
+            nonlocal concurrent_count, max_concurrent
+            with count_lock:
+                concurrent_count += 1
+                max_concurrent = max(max_concurrent, concurrent_count)
+            time.sleep(0.0001)
+            result = self.uid == other.uid
+            with count_lock:
+                concurrent_count -= 1
+            return result
+
+    for i in range(10):
+        m.set(CollisionKey(i), i)
+
+    barrier = threading.Barrier(4, timeout=10.0)
+    errors = []
+
+    def worker(start):
+        barrier.wait()
+        for i in range(start, start + 20):
+            try:
+                m.set(CollisionKey(i), i * 10)
+            except Exception as e:
+                errors.append(e)
+
+    threads = [
+        threading.Thread(target=worker, args=(100,)),
+        threading.Thread(target=worker, args=(200,)),
+        threading.Thread(target=worker, args=(300,)),
+        threading.Thread(target=worker, args=(400,)),
+    ]
+
+    for t in threads: t.start()
+    for t in threads: t.join(timeout=5.0)
+
+    assert not errors, f"操作中产生非预期异常: {errors}"
+    assert max_concurrent > 1, f"__eq__ 最大并发数 = {max_concurrent}"
 
 

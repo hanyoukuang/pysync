@@ -1,11 +1,11 @@
-use pyo3::prelude::*;
-use pyo3::exceptions::{PyValueError, PyRuntimeError};
-use pyo3::{Py, PyAny};
-use pyo3::types::{PyTuple, PyDict};
-use crossbeam_channel::{Sender, unbounded};
-use std::thread::{self, JoinHandle};
-use std::sync::Arc;
+use crossbeam_channel::{unbounded, Sender};
 use parking_lot::Mutex;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyTuple};
+use pyo3::{Py, PyAny};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
 
 /// A task wrapper containing callable methods, arguments, target Python future handles, and contextvars context.
 struct Task {
@@ -35,13 +35,17 @@ impl ThreadPool {
     fn new(num_workers: Option<isize>) -> PyResult<Self> {
         if let Some(val) = num_workers {
             if val <= 0 {
-                return Err(PyValueError::new_err("num_workers must be greater than zero"));
+                return Err(PyValueError::new_err(
+                    "num_workers must be greater than zero",
+                ));
             }
         }
 
         // Default to the machine's available physical CPU core count
         let workers_count = num_workers.unwrap_or_else(|| {
-            thread::available_parallelism().map(|n| n.get() as isize).unwrap_or(4)
+            thread::available_parallelism()
+                .map(|n| n.get() as isize)
+                .unwrap_or(4)
         }) as usize;
 
         let (sender, receiver) = unbounded::<Task>();
@@ -128,9 +132,10 @@ impl ThreadPool {
             return Err(PyRuntimeError::new_err("ThreadPool is shutdown"));
         }
 
-        let sender = self.sender.as_ref().ok_or_else(|| {
-            PyRuntimeError::new_err("ThreadPool is shutdown")
-        })?;
+        let sender = self
+            .sender
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("ThreadPool is shutdown"))?;
 
         // Capture current thread's contextvars Context
         let context = match py.import("contextvars") {
@@ -152,9 +157,9 @@ impl ThreadPool {
             context,
         };
 
-        sender.send(task).map_err(|_| {
-            PyRuntimeError::new_err("Failed to submit task to worker threads")
-        })?;
+        sender
+            .send(task)
+            .map_err(|_| PyRuntimeError::new_err("Failed to submit task to worker threads"))?;
 
         Ok(future.unbind())
     }
@@ -196,8 +201,6 @@ impl ThreadPool {
     }
 }
 
-/// Implement Drop trait to ensure automatic resource cleanup.
-/// Prevents orphaned background threads if the Python GC reclaims ThreadPool.
 impl Drop for ThreadPool {
     fn drop(&mut self) {
         {
@@ -208,9 +211,14 @@ impl Drop for ThreadPool {
         // Drops the sender, causing worker receivers to exit once work queue is empty.
         self.sender = None;
 
-        // Join worker threads to ensure clean shutdown without detaching threads
-        for handle in self.workers.drain(..) {
-            let _ = handle.join();
+        // Spawn a background helper thread to join workers asynchronously, avoiding GC thread blocking
+        let workers = std::mem::take(&mut self.workers);
+        if !workers.is_empty() {
+            std::thread::spawn(move || {
+                for handle in workers {
+                    let _ = handle.join();
+                }
+            });
         }
     }
 }

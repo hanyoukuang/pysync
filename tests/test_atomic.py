@@ -1,18 +1,5 @@
-import time
 import threading
-import gc
-import sys
-import queue
 import pytest
-import pysync
-from pysync import Channel, ConcurrentDict, RwLock, AtomicInteger, AtomicBoolean, ThreadPool, ThreadGroup, Actor
-
-
-# ============================================================================
-# From test_atomic.py
-# ============================================================================
-import pytest
-import threading
 from pysync import AtomicInteger, AtomicBoolean
 
 # ==========================================
@@ -143,23 +130,17 @@ def test_atomic_integer_boundary_values(initial, delta):
 # 3. ERROR PARAMETERIZED TESTS (15 cases)
 # ==========================================
 
-invalid_init_types = [
-    "string", 1.5, [1, 2], {"val": 10}, None, (1, 2)
-]
+def test_atomic_invalid_type_errors():
+    """Verify invalid parameter types raise TypeError for AtomicInteger and AtomicBoolean."""
+    invalid_init_types = ["string", 1.5, [1, 2], {"val": 10}, None, (1, 2)]
+    
+    for bad_val in invalid_init_types:
+        with pytest.raises(TypeError):
+            AtomicInteger(bad_val)
+        with pytest.raises(TypeError):
+            AtomicBoolean(bad_val)
 
-@pytest.mark.parametrize("bad_val", invalid_init_types)
-def test_atomic_integer_invalid_init(bad_val):
-    with pytest.raises(TypeError):
-        AtomicInteger(bad_val)
-
-@pytest.mark.parametrize("bad_val", invalid_init_types)
-def test_atomic_boolean_invalid_init(bad_val):
-    with pytest.raises(TypeError):
-        AtomicBoolean(bad_val)
-
-def test_atomic_errors_type_checking():
     a = AtomicInteger(0)
-    # 5 additional error checks
     with pytest.raises(TypeError):
         a.set("string")
     with pytest.raises(TypeError):
@@ -172,7 +153,6 @@ def test_atomic_errors_type_checking():
         a.get_and_set([1, 2])
 
     b = AtomicBoolean(False)
-    # 5 additional error checks
     with pytest.raises(TypeError):
         b.set(100)
     with pytest.raises(TypeError):
@@ -181,3 +161,15 @@ def test_atomic_errors_type_checking():
         b.compare_and_set("not_a_bool", True)
     with pytest.raises(TypeError):
         b.get_and_set("string")
+
+
+def test_atomic_wrapping_overflow_semantics():
+    """Verify AtomicInteger uses wrapping arithmetic on i64 overflow."""
+    import pysync
+
+    atomic = pysync.AtomicInteger(9223372036854775807)  # i64::MAX
+    assert atomic.get() == 9223372036854775807
+
+    result = atomic.increment()
+    assert result == -9223372036854775808
+    assert atomic.get() == -9223372036854775808

@@ -608,8 +608,8 @@ class Actor:
         Does not create or return a Future, maximizing throughput.
         """
         ...
-    def stop(self) -> None:
+    def stop(self, timeout: Optional[float] = None) -> None:
         """
-        Gracefully stop the actor, waiting for mailbox backlog to finish.
+        Gracefully stop the actor, waiting for mailbox backlog to finish, with an optional timeout.
         """
         ...

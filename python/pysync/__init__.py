@@ -1,12 +1,15 @@
 from pysync._pysync import (
+    ActorCore,
+    AtomicBoolean,
+    AtomicInteger,
     Channel,
     ConcurrentMap,
-    ThreadPool,
-    AtomicInteger,
-    AtomicBoolean,
+    RecvOp,
     RwLock,
     RwLockReadGuard,
     RwLockWriteGuard,
+    SendOp,
+    ThreadPool,
     select,
 )
 
@@ -15,16 +18,19 @@ from pysync.group import ThreadGroup
 from pysync.actor import Actor
 
 __all__ = [
-    "Channel",
-    "ConcurrentMap",
-    "ConcurrentDict",
-    "ThreadPool",
-    "AtomicInteger",
+    "Actor",
+    "ActorCore",
     "AtomicBoolean",
+    "AtomicInteger",
+    "Channel",
+    "ConcurrentDict",
+    "ConcurrentMap",
+    "RecvOp",
     "RwLock",
     "RwLockReadGuard",
     "RwLockWriteGuard",
-    "select",
+    "SendOp",
     "ThreadGroup",
-    "Actor",
+    "ThreadPool",
+    "select",
 ]

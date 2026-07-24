@@ -107,14 +107,26 @@ class ConcurrentDict(ConcurrentMap):
     def update(self, other=None, **kwargs):
         """
         Update the dictionary with key-value pairs from other, overwriting existing keys.
+        Thread-safe: safely skips keys deleted concurrently from source mapping.
         """
         if other is not None:
-            if hasattr(other, 'keys'):
-                for k in other.keys():
-                    self.set(k, other[k])
+            if isinstance(other, ConcurrentMap):
+                for k, v in other.items():
+                    self.set(k, v)
             elif hasattr(other, 'items'):
                 for k, v in other.items():
                     self.set(k, v)
+            elif hasattr(other, 'keys'):
+                for k in other.keys():
+                    if hasattr(other, 'get_val'):
+                        found, val = other.get_val(k)
+                        if found:
+                            self.set(k, val)
+                    else:
+                        try:
+                            self.set(k, other[k])
+                        except KeyError:
+                            pass
             else:
                 for k, v in other:
                     self.set(k, v)

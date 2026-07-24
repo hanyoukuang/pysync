@@ -1,19 +1,8 @@
 import time
 import threading
 import gc
-import sys
-import queue
+import weakref
 import pytest
-import pysync
-from pysync import Channel, ConcurrentDict, RwLock, AtomicInteger, AtomicBoolean, ThreadPool, ThreadGroup, Actor
-
-
-# ============================================================================
-# From test_channel.py
-# ============================================================================
-import pytest
-import time
-import threading
 from pysync import Channel, select
 
 # ==========================================
@@ -609,4 +598,115 @@ def test_select_duplicate_channel_ops():
 
     ch.close()
     ch_other.close()
+
+
+class _TrackedChannelPayload:
+    def __init__(self, name, tracker):
+        self.name = name
+        self.tracker = tracker
+
+    def __del__(self):
+        self.tracker.append(f"del_{self.name}")
+
+
+def test_channel_send_no_timeout_close_during_wait_destructs_safely():
+    """Verify send() blocking without timeout destructs item safely on close()."""
+    ch = Channel(capacity=1)
+    ch.send("capacity_blocker")
+
+    tracker = []
+    payload = _TrackedChannelPayload("no_timeout", tracker)
+    weak_ref = weakref.ref(payload)
+
+    send_err = []
+
+    def blocking_sender():
+        try:
+            ch.send(payload, timeout=None)
+        except ValueError as e:
+            send_err.append(str(e))
+
+    t = threading.Thread(target=blocking_sender)
+    t.start()
+    time.sleep(0.05)
+    ch.close()
+    t.join(timeout=2.0)
+
+    assert len(send_err) == 1 and "closed" in send_err[0]
+    del payload
+    gc.collect()
+    assert weak_ref() is None
+    assert "del_no_timeout" in tracker
+
+
+def test_channel_send_timeout_close_during_wait_destructs_safely():
+    """Verify send(timeout=...) blocking destructs item safely on close()."""
+    ch = Channel(capacity=1)
+    ch.send("capacity_blocker")
+
+    tracker = []
+    payload = _TrackedChannelPayload("with_timeout", tracker)
+    weak_ref = weakref.ref(payload)
+
+    send_err = []
+
+    def blocking_sender():
+        try:
+            ch.send(payload, timeout=5.0)
+        except ValueError as e:
+            send_err.append(str(e))
+
+    t = threading.Thread(target=blocking_sender)
+    t.start()
+    time.sleep(0.05)
+    ch.close()
+    t.join(timeout=2.0)
+
+    assert len(send_err) == 1 and "closed" in send_err[0]
+    del payload
+    gc.collect()
+    assert weak_ref() is None
+    assert "del_with_timeout" in tracker
+
+
+def test_channel_recv_op_remains_usable_after_close():
+    """Verify receiver remains usable for recv_op() after channel close."""
+    ch = Channel(capacity=5)
+    ch.send("hello")
+    ch.close()
+
+    op = ch.recv_op()
+    assert op is not None
+
+    idx, val = select([op], timeout=1.0)
+    assert val == "hello"
+
+    op2 = ch.recv_op()
+    assert op2 is not None
+    with pytest.raises(ValueError, match="closed"):
+        select([op2], timeout=0.5)
+
+
+def test_channel_send_timeout_object_cleanup():
+    """Verify sent object is properly cleaned up after send() timeout."""
+    ch = Channel(capacity=1)
+    ch.send("blocker")
+
+    cleanup_tracker = []
+
+    class TrackedObject:
+        def __del__(self):
+            cleanup_tracker.append("cleaned")
+
+    obj = TrackedObject()
+    ref = weakref.ref(obj)
+
+    with pytest.raises(TimeoutError):
+        ch.send(obj, timeout=0.05)
+
+    del obj
+    gc.collect()
+
+    assert ref() is None
+    assert "cleaned" in cleanup_tracker
 

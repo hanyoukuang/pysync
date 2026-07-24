@@ -1,18 +1,22 @@
-use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
-use std::sync::Arc;
+use pyo3::prelude::*;
 use std::cell::RefCell;
+use std::sync::Arc;
 
 thread_local! {
-    static READ_DEPTH: RefCell<usize> = RefCell::new(0);
+    static READ_DEPTH: RefCell<usize> = const { RefCell::new(0) };
 }
 
-/// FFI wrapper to satisfy PyO3 `py.detach`'s `Ungil` (`Send`) bound for `parking_lot` lock guards.
-/// `lock_api` guards contain `*mut ()` (`!Send`), but constructed guards are unwrapped immediately
-/// on the same thread after `py.detach` returns.
-struct UnsafeSendGuard<T>(T);
-unsafe impl<T> Send for UnsafeSendGuard<T> {}
-unsafe impl<T> Sync for UnsafeSendGuard<T> {}
+/// FFI wrapper to satisfy PyO3 `py.detach`'s `Ungil` (`Send`) bound for `parking_lot::ArcRwLockReadGuard`.
+/// In `lock_api`, `ArcRwLockReadGuard` contains `GuardNoSend(*mut ())` (`!Send`).
+/// Since `()` is `Send + Sync` and the guard is unwrapped immediately on the same thread
+/// right after `py.detach` returns, implementing `Send` specifically for this concrete guard is safe.
+struct SendableArcReadGuard(parking_lot::ArcRwLockReadGuard<parking_lot::RawRwLock, ()>);
+unsafe impl Send for SendableArcReadGuard {}
+
+/// FFI wrapper to satisfy PyO3 `py.detach`'s `Ungil` (`Send`) bound for `parking_lot::ArcRwLockWriteGuard`.
+struct SendableArcWriteGuard(parking_lot::ArcRwLockWriteGuard<parking_lot::RawRwLock, ()>);
+unsafe impl Send for SendableArcWriteGuard {}
 
 /// A native Reader-Writer lock based on parking_lot::RwLock.
 /// Allows multiple concurrent readers or a single exclusive writer.
@@ -100,24 +104,29 @@ impl RwLockReadGuard {
             s_ref.lock.clone()
         };
 
-        let guard_wrapper = s.py().detach(|| {
+        let wrapper = s.py().detach(|| {
             if is_reentrant {
-                UnsafeSendGuard(lock.read_arc_recursive())
+                SendableArcReadGuard(lock.read_arc_recursive())
             } else {
-                UnsafeSendGuard(lock.read_arc())
+                SendableArcReadGuard(lock.read_arc())
             }
         });
 
         READ_DEPTH.with(|depth| *depth.borrow_mut() += 1);
 
         let mut s_mut = s.borrow_mut();
-        s_mut.guard = Some(guard_wrapper.0);
+        s_mut.guard = Some(wrapper.0);
 
         Ok(s.clone())
     }
 
     /// Exit the read lock context, releasing the lock.
-    fn __exit__(&mut self, _exc_type: &Bound<'_, PyAny>, _exc_value: &Bound<'_, PyAny>, _traceback: &Bound<'_, PyAny>) {
+    fn __exit__(
+        &mut self,
+        _exc_type: &Bound<'_, PyAny>,
+        _exc_value: &Bound<'_, PyAny>,
+        _traceback: &Bound<'_, PyAny>,
+    ) {
         if self.guard.is_some() {
             READ_DEPTH.with(|depth| {
                 let mut d = depth.borrow_mut();
@@ -156,17 +165,21 @@ impl RwLockWriteGuard {
                 let s_ref = s.borrow();
                 s_ref.lock.clone()
             };
-            let guard_wrapper = s.py().detach(|| UnsafeSendGuard(lock.write_arc()));
+            let wrapper = s.py().detach(|| SendableArcWriteGuard(lock.write_arc()));
             let mut s_mut = s.borrow_mut();
-            s_mut.guard = Some(guard_wrapper.0);
+            s_mut.guard = Some(wrapper.0);
         }
 
         Ok(s.clone())
     }
 
     /// Exit the write lock context, releasing the lock.
-    fn __exit__(&mut self, _exc_type: &Bound<'_, PyAny>, _exc_value: &Bound<'_, PyAny>, _traceback: &Bound<'_, PyAny>) {
+    fn __exit__(
+        &mut self,
+        _exc_type: &Bound<'_, PyAny>,
+        _exc_value: &Bound<'_, PyAny>,
+        _traceback: &Bound<'_, PyAny>,
+    ) {
         self.guard = None;
     }
 }
-

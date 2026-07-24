@@ -1,19 +1,6 @@
 import time
 import threading
-import gc
-import sys
-import queue
 import pytest
-import pysync
-from pysync import Channel, ConcurrentDict, RwLock, AtomicInteger, AtomicBoolean, ThreadPool, ThreadGroup, Actor
-
-
-# ============================================================================
-# From test_lock.py
-# ============================================================================
-import pytest
-import threading
-import time
 from pysync import RwLock
 
 # ==========================================
@@ -73,6 +60,60 @@ def test_rwlock_write_exclusion():
     
     # Reader must see "done_writing" before reading
     assert shared_data == ["writing", "done_writing", "read_2"]
+
+
+def test_rwlock_multithreaded_read_write_safety():
+    """Verify RwLock read and write safety under multi-threaded contention."""
+    lock = RwLock()
+    state = {"val": 0}
+    errors = []
+
+    def reader():
+        for _ in range(100):
+            try:
+                with lock.read():
+                    _ = state["val"]
+            except Exception as e:
+                errors.append(e)
+
+    def writer():
+        for _ in range(100):
+            try:
+                with lock.write():
+                    state["val"] += 1
+            except Exception as e:
+                errors.append(e)
+
+    threads = [
+        threading.Thread(target=reader if i % 2 == 0 else writer) for i in range(16)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5.0)
+
+    assert not errors, f"RwLock 多线程操作出现异常: {errors}"
+    assert state["val"] == 800
+
+
+def test_rwlock_guard_exception_safety():
+    """Verify RwLock guard unwinds cleanly and safely when exceptions are raised inside context."""
+    lock = RwLock()
+
+    with pytest.raises(ValueError):
+        with lock.read():
+            raise ValueError("inside read")
+
+    with lock.write():
+        pass
+
+    with pytest.raises(ValueError):
+        with lock.write():
+            raise ValueError("inside write")
+
+    with lock.read():
+        pass
+
 
 def test_rwlock_multi_read_write_flow():
     """Test multi-threaded read/write consistency (remaining happy path cases)."""

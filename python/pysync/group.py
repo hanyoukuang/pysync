@@ -52,6 +52,13 @@ class ThreadGroup:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        """
+        Exit the ThreadGroup context. Joins all spawned threads, then aggregates
+        any exceptions from child threads together with the context body exception
+        into a single ExceptionGroup (Python 3.11+). Single exceptions are raised
+        directly; multiple exceptions are always aggregated to prevent silent loss
+        of diagnostic information.
+        """
         joined = set()
         while True:
             with self._lock:
@@ -63,12 +70,28 @@ class ThreadGroup:
                     t.join()
                 joined.add(t)
 
-        # If the main context block body raised an exception, prioritize it over thread exceptions.
+        # Collect all exceptions: context body + child thread exceptions.
+        # PEP 654 / Trio / asyncio.TaskGroup convention:
+        #   single exception → raise directly
+        #   multiple exceptions → ExceptionGroup
+        
+        # Aggregate main block exception with all child thread exceptions
+        all_errors = []
         if exc_val is not None:
+            all_errors.append(exc_val)
+        with self._lock:
+            all_errors.extend(self._errors)
+
+        if not all_errors:
             return False
 
-        # Propagate the aggregated exceptions
-        if self._errors:
-            if len(self._errors) == 1:
-                raise self._errors[0]
-            raise ExceptionGroup("Multiple exceptions occurred inside ThreadGroup tasks", self._errors)
+        # If only the main block raised an exception, let normal exception propagation happen
+        if len(all_errors) == 1 and exc_val is not None:
+            return False
+
+        # If only a single child thread raised an exception and main block succeeded, raise it directly
+        if len(all_errors) == 1:
+            raise all_errors[0]
+
+        # Aggregate multiple exceptions into an ExceptionGroup
+        raise ExceptionGroup("Multiple exceptions occurred inside ThreadGroup tasks", all_errors)

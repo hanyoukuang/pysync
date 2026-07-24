@@ -1,7 +1,9 @@
+use parking_lot::Mutex;
 use pyo3::prelude::*;
 use pyo3::{Py, PyAny};
 use std::collections::HashMap;
-use parking_lot::Mutex;
+
+type MapShard = Mutex<HashMap<u64, Vec<(Py<PyAny>, Py<PyAny>)>>>;
 
 /// A highly concurrent, thread-safe hash map with dynamically configurable shard count.
 /// Each shard is protected by a Mutex. Python callbacks (like `__eq__` and `__hash__`)
@@ -9,7 +11,7 @@ use parking_lot::Mutex;
 /// or recursive deadlocks in multi-threaded GIL-free environments.
 #[pyclass(subclass)]
 pub struct ConcurrentMap {
-    shards: Vec<Mutex<HashMap<u64, Vec<(Py<PyAny>, Py<PyAny>)>>>>,
+    shards: Vec<MapShard>,
 }
 
 #[pymethods]
@@ -20,16 +22,16 @@ impl ConcurrentMap {
         let count = match shard_count {
             Some(n) => {
                 if n == 0 {
-                    return Err(pyo3::exceptions::PyValueError::new_err("shard_count must be greater than zero"));
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "shard_count must be greater than zero",
+                    ));
                 }
                 n
             }
-            None => {
-                std::thread::available_parallelism()
-                    .map(|p| p.get().next_power_of_two())
-                    .unwrap_or(16)
-                    .max(16)
-            }
+            None => std::thread::available_parallelism()
+                .map(|p| p.get().next_power_of_two())
+                .unwrap_or(16)
+                .max(16),
         };
 
         let mut shards = Vec::with_capacity(count);
@@ -96,14 +98,42 @@ impl ConcurrentMap {
     }
 
     /// Atomically get the existing value for key, or insert default and return default if absent.
-    fn get_or_insert(&self, py: Python<'_>, key: Bound<'_, PyAny>, default: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    fn get_or_insert(
+        &self,
+        py: Python<'_>,
+        key: Bound<'_, PyAny>,
+        default: Py<PyAny>,
+    ) -> PyResult<Py<PyAny>> {
         let h = key.hash()? as u64;
         let idx = (h as usize) % self.shards.len();
         let pykey = key.clone().unbind();
 
-        let mut checked_keys: Vec<Py<PyAny>> = Vec::new();
+        let mut checked_keys: Vec<Py<PyAny>> = Vec::with_capacity(8);
+        let mut retries = 0;
 
         loop {
+            retries += 1;
+
+            // Backoff on contention
+            if retries > 16 {
+                std::thread::yield_now();
+            }
+
+            // Fallback for extreme collision starvation: compare under lock briefly to guarantee forward progress
+            // SAFETY: only uses pointer identity (Py::is), never calls Python __eq__ inside the lock.
+            // Calling __eq__ inside a shard lock can deadlock if __eq__ accesses the same ConcurrentMap.
+            if retries > 64 {
+                let mut shard = self.shards[idx].lock();
+                let list = shard.entry(h).or_default();
+                for (k, v) in list.iter() {
+                    if k.is(&pykey) {
+                        return Ok(v.clone_ref(py));
+                    }
+                }
+                list.push((pykey.clone_ref(py), default.clone_ref(py)));
+                return Ok(default);
+            }
+
             // 1. Collect candidate keys under shard lock that haven't been checked yet
             let new_candidates = {
                 let shard = self.shards[idx].lock();
@@ -127,15 +157,19 @@ impl ConcurrentMap {
                 if k.bind(py).eq(&key)? {
                     return Ok(v);
                 }
-                checked_keys.push(k);
+                if checked_keys.len() < 64 {
+                    checked_keys.push(k);
+                }
             }
 
             // 3. Re-lock shard and attempt insertion if no new candidates appeared
             let mut shard = self.shards[idx].lock();
-            let list = shard.entry(h).or_insert_with(Vec::new);
+            let list = shard.entry(h).or_default();
 
             // Check if any candidate exists in list that hasn't been checked for equality
-            let has_unbound_candidate = list.iter().any(|(k, _)| !checked_keys.iter().any(|ck| ck.is(k)));
+            let has_unbound_candidate = list
+                .iter()
+                .any(|(k, _)| !checked_keys.iter().any(|ck| ck.is(k)));
 
             if has_unbound_candidate {
                 // Another thread inserted an item under hash `h` while lock was released!
@@ -183,9 +217,15 @@ impl ConcurrentMap {
         }
 
         // Slow-path for hash collision with distinct PyObjects: retry loop
-        let mut checked_keys: Vec<Py<PyAny>> = Vec::new();
+        let mut checked_keys: Vec<Py<PyAny>> = Vec::with_capacity(8);
+        let mut retries = 0;
 
         loop {
+            retries += 1;
+            if retries > 16 {
+                std::thread::yield_now();
+            }
+
             // 1. Collect candidate keys under lock that haven't been checked yet
             let new_candidates = {
                 let shard = self.shards[idx].lock();
@@ -207,7 +247,9 @@ impl ConcurrentMap {
             // 2. Perform key comparisons outside the lock
             for k in new_candidates {
                 let is_match = k.bind(py).eq(&key)?;
-                checked_keys.push(k.clone_ref(py));
+                if checked_keys.len() < 64 {
+                    checked_keys.push(k.clone_ref(py));
+                }
                 if is_match {
                     let mut shard = self.shards[idx].lock();
                     if let Some(list) = shard.get_mut(&h) {
@@ -218,16 +260,30 @@ impl ConcurrentMap {
                     }
                     // k matched __eq__ outside lock, but pointer identity failed after re-locking
                     // because another thread replaced or removed the key object while lock was released.
-                    // k is pushed to checked_keys above so it is explicitly marked as evaluated.
                     break;
                 }
             }
 
             // 3. Re-lock and update or insert if no unchecked candidate remains
             let mut shard = self.shards[idx].lock();
-            let list = shard.entry(h).or_insert_with(Vec::new);
+            let list = shard.entry(h).or_default();
 
-            let has_unbound_candidate = list.iter().any(|(k, _)| !checked_keys.iter().any(|ck| ck.is(k)));
+            // Fallback for extreme collision starvation: compare under lock if retries exceeds threshold
+            // SAFETY: only uses pointer identity, never calls Python __eq__ inside the lock.
+            if retries > 64 {
+                for (k, v) in list.iter_mut() {
+                    if k.is(&pykey) {
+                        *v = value;
+                        return Ok(());
+                    }
+                }
+                list.push((pykey, value));
+                return Ok(());
+            }
+
+            let has_unbound_candidate = list
+                .iter()
+                .any(|(k, _)| !checked_keys.iter().any(|ck| ck.is(k)));
             if has_unbound_candidate {
                 continue;
             }
@@ -268,9 +324,15 @@ impl ConcurrentMap {
         }
 
         // Slow-path for hash collision with distinct PyObjects: retry loop
-        let mut checked_keys: Vec<Py<PyAny>> = Vec::new();
+        let mut checked_keys: Vec<Py<PyAny>> = Vec::with_capacity(8);
+        let mut retries = 0;
 
         loop {
+            retries += 1;
+            if retries > 16 {
+                std::thread::yield_now();
+            }
+
             // 1. Collect candidate keys under lock that haven't been checked yet
             let new_candidates = {
                 let shard = self.shards[idx].lock();
@@ -292,7 +354,9 @@ impl ConcurrentMap {
             // 2. Perform key comparisons outside the lock
             for k in new_candidates {
                 let is_match = k.bind(py).eq(&key)?;
-                checked_keys.push(k.clone_ref(py));
+                if checked_keys.len() < 64 {
+                    checked_keys.push(k.clone_ref(py));
+                }
                 if is_match {
                     let mut shard = self.shards[idx].lock();
                     if let Some(list) = shard.get_mut(&h) {
@@ -304,9 +368,6 @@ impl ConcurrentMap {
                             return Ok(true);
                         }
                     }
-                    // k matched __eq__ outside lock, but pointer identity failed after re-locking
-                    // because another thread replaced or removed the key object while lock was released.
-                    // k is pushed to checked_keys above so it is explicitly marked as evaluated.
                     break;
                 }
             }
@@ -314,7 +375,23 @@ impl ConcurrentMap {
             // 3. Re-lock shard and return false if no unchecked candidate remains
             let mut shard = self.shards[idx].lock();
             if let Some(list) = shard.get_mut(&h) {
-                let has_unbound_candidate = list.iter().any(|(k, _)| !checked_keys.iter().any(|ck| ck.is(k)));
+                if retries > 64 {
+                    // SAFETY: only uses pointer identity, never calls Python __eq__ inside the lock.
+                    for pos in 0..list.len() {
+                        if list[pos].0.is(&pykey) {
+                            list.remove(pos);
+                            if list.is_empty() {
+                                shard.remove(&h);
+                            }
+                            return Ok(true);
+                        }
+                    }
+                    return Ok(false);
+                }
+
+                let has_unbound_candidate = list
+                    .iter()
+                    .any(|(k, _)| !checked_keys.iter().any(|ck| ck.is(k)));
                 if has_unbound_candidate {
                     continue;
                 }
@@ -359,9 +436,15 @@ impl ConcurrentMap {
         }
 
         // Slow-path for hash collision with distinct PyObjects: retry loop
-        let mut checked_keys: Vec<Py<PyAny>> = Vec::new();
+        let mut checked_keys: Vec<Py<PyAny>> = Vec::with_capacity(8);
+        let mut retries = 0;
 
         loop {
+            retries += 1;
+            if retries > 16 {
+                std::thread::yield_now();
+            }
+
             // 1. Collect candidate keys under lock that haven't been checked yet
             let new_candidates = {
                 let shard = self.shards[idx].lock();
@@ -383,7 +466,9 @@ impl ConcurrentMap {
             // 2. Perform key comparisons outside the lock
             for k in new_candidates {
                 let is_match = k.bind(py).eq(&key)?;
-                checked_keys.push(k.clone_ref(py));
+                if checked_keys.len() < 64 {
+                    checked_keys.push(k.clone_ref(py));
+                }
                 if is_match {
                     let mut shard = self.shards[idx].lock();
                     if let Some(list) = shard.get_mut(&h) {
@@ -395,9 +480,6 @@ impl ConcurrentMap {
                             return Ok((true, val));
                         }
                     }
-                    // k matched __eq__ outside lock, but pointer identity failed after re-locking
-                    // because another thread replaced or removed the key object while lock was released.
-                    // k is pushed to checked_keys above so it is explicitly marked as evaluated.
                     break;
                 }
             }
@@ -405,7 +487,23 @@ impl ConcurrentMap {
             // 3. Re-lock shard and return (false, None) if no unchecked candidate remains
             let mut shard = self.shards[idx].lock();
             if let Some(list) = shard.get_mut(&h) {
-                let has_unbound_candidate = list.iter().any(|(k, _)| !checked_keys.iter().any(|ck| ck.is(k)));
+                if retries > 64 {
+                    // SAFETY: only uses pointer identity, never calls Python __eq__ inside the lock.
+                    for pos in 0..list.len() {
+                        if list[pos].0.is(&pykey) {
+                            let (_, val) = list.remove(pos);
+                            if list.is_empty() {
+                                shard.remove(&h);
+                            }
+                            return Ok((true, val));
+                        }
+                    }
+                    return Ok((false, py.None()));
+                }
+
+                let has_unbound_candidate = list
+                    .iter()
+                    .any(|(k, _)| !checked_keys.iter().any(|ck| ck.is(k)));
                 if has_unbound_candidate {
                     continue;
                 }

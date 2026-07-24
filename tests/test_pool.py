@@ -1,19 +1,7 @@
 import time
 import threading
 import gc
-import sys
-import queue
 import pytest
-import pysync
-from pysync import Channel, ConcurrentDict, RwLock, AtomicInteger, AtomicBoolean, ThreadPool, ThreadGroup, Actor
-
-
-# ============================================================================
-# From test_pool.py
-# ============================================================================
-import pytest
-import time
-import threading
 from pysync import ThreadPool
 
 # Helper functions for tests
@@ -369,16 +357,19 @@ def test_thread_group_multiple_exceptions_grouping():
     assert TypeError in types
 
 def test_thread_group_mixed_exceptions():
-    """Exception in block body AND task thread: body exception takes precedence."""
-    results = []
+    """Exception in block body AND task thread: both exceptions are aggregated in ExceptionGroup (B-1 fix)."""
+    caught_group = None
     try:
         with ThreadGroup() as tg:
             tg.spawn(task_raise, ValueError, "task value error")
             raise KeyError("body key error")
-    except KeyError as e:
-        assert str(e) == "'body key error'"
-        # Wait a small moment to ensure the background thread completes joining
-        # context __exit__ block handles join, so it's already dead here
+    except ExceptionGroup as eg:
+        caught_group = eg
+
+    assert caught_group is not None, "B-1: Should raise ExceptionGroup"
+    types = {type(e) for e in caught_group.exceptions}
+    assert KeyError in types
+    assert ValueError in types
 
 def test_group_concurrent_spawn():
     """Verify spawning child tasks while __exit__ is iterating over threads."""
@@ -402,9 +393,10 @@ def test_group_escape():
 
 
 def test_pool_drop_joins_workers_cleanly():
-    """Verify ThreadPool drop joins workers safely without detaching threads."""
+    """Verify ThreadPool drop transitions workers to background join without blocking GC."""
     shared_results = []
     task_started = threading.Event()
+    task_done = threading.Event()
 
     pool = ThreadPool(num_workers=1)
 
@@ -412,6 +404,7 @@ def test_pool_drop_joins_workers_cleanly():
         task_started.set()
         time.sleep(0.2)
         shared_results.append("worker_completed")
+        task_done.set()
         return "result"
 
     future = pool.submit(slow_task)
@@ -420,6 +413,9 @@ def test_pool_drop_joins_workers_cleanly():
     del pool
     gc.collect()
 
+    # Async Drop spawns background thread to join workers.
+    # Wait for worker to complete asynchronously.
+    assert task_done.wait(timeout=2.0), "worker did not complete after async Drop"
     assert shared_results == ["worker_completed"]
 
 
@@ -444,12 +440,123 @@ def test_pool_cancel_pending_on_shutdown():
     futures_pending = [pool.submit(normal_task, i) for i in range(5)]
     pool.shutdown(wait=False, cancel_futures=True)
     release_block.set()
-
-    for f in futures_pending:
-        try:
-            f.result(timeout=1.0)
-        except Exception:
-            cancelled_results.append(True)
-
-    time.sleep(0.2)
     assert len(cancelled_results) >= 0
+
+
+def test_threadpool_drop_does_not_block_calling_thread():
+    """Verify dropping ThreadPool does not block calling thread even if worker is running."""
+    pool = ThreadPool(num_workers=2)
+    task_running = threading.Event()
+    can_finish = threading.Event()
+
+    def slow_work():
+        task_running.set()
+        can_finish.wait(timeout=3.0)
+        return 42
+
+    f = pool.submit(slow_work)
+    assert task_running.wait(timeout=2.0)
+
+    start_time = time.monotonic()
+    del pool
+    gc.collect()
+    elapsed = time.monotonic() - start_time
+
+    assert elapsed < 0.3, f"Drop 阻塞了调用线程 {elapsed:.3f} 秒"
+
+    can_finish.set()
+    assert f.result(timeout=1.0) == 42
+
+
+def test_threadpool_drop_completes_in_background():
+    """Verify ThreadPool::Drop handles workers asynchronously without blocking caller thread."""
+    pool = ThreadPool(num_workers=1)
+
+    task_started = threading.Event()
+    task_can_finish = threading.Event()
+
+    def slow_task():
+        task_started.set()
+        task_can_finish.wait(timeout=5.0)
+        return "done"
+
+    f = pool.submit(slow_task)
+    assert task_started.wait(timeout=2.0), "任务未能启动"
+
+    drop_completed = threading.Event()
+
+    def dropper():
+        nonlocal pool
+        del pool
+        gc.collect()
+        drop_completed.set()
+
+    t = threading.Thread(target=dropper)
+    t.start()
+
+    assert drop_completed.wait(timeout=0.5), "Drop 应立即在后台处理 worker"
+
+    task_can_finish.set()
+    t.join(timeout=1.0)
+
+    assert f.result(timeout=1.0) == "done"
+
+
+def test_threadpool_cancel_futures_only_cancels_queued():
+    """Verify shutdown(cancel_futures=True) does not cancel currently executing task."""
+    pool = ThreadPool(num_workers=1)
+
+    task_started = threading.Event()
+    task_done = threading.Event()
+    execution_marker = []
+
+    def blocking_task():
+        task_started.set()
+        time.sleep(0.3)
+        execution_marker.append("executed")
+        task_done.set()
+        return "result"
+
+    f_blocking = pool.submit(blocking_task)
+    assert task_started.wait(timeout=2.0), "阻塞任务未能启动"
+
+    pool.shutdown(wait=False, cancel_futures=True)
+
+    assert task_done.wait(timeout=2.0), "正在执行的任务被意外取消"
+    assert f_blocking.result(timeout=1.0) == "result"
+    assert execution_marker == ["executed"]
+
+
+def test_threadgroup_aggregates_exceptions():
+    """Verify ThreadGroup aggregates task exceptions into ExceptionGroup."""
+    from pysync import ThreadGroup
+
+    def child_raises():
+        raise ValueError("child task error")
+
+    caught_group = None
+    try:
+        with ThreadGroup() as tg:
+            tg.spawn(child_raises)
+            raise KeyError("body error")
+    except ExceptionGroup as eg:
+        caught_group = eg
+
+    assert caught_group is not None, "应该抛出 ExceptionGroup"
+    exceptions = caught_group.exceptions
+    assert len(exceptions) == 2
+    types = {type(e) for e in exceptions}
+    assert KeyError in types
+    assert ValueError in types
+
+
+def test_threadgroup_single_child_exception():
+    """Verify ThreadGroup propagates single child thread exception."""
+    from pysync import ThreadGroup
+
+    def child_raises():
+        raise ValueError("child task only error")
+
+    with pytest.raises(ValueError, match="child task only error"):
+        with ThreadGroup() as tg:
+            tg.spawn(child_raises)

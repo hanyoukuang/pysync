@@ -1,310 +1,203 @@
+"""
+Actor model implementation with a Rust concurrency-safe backend.
+
+All TOCTOU-prone operations (state check + message enqueue, thread
+lifecycle management, stop sequencing) are handled by ActorCore (Rust).
+The Python layer is a thin facade: __init_subclass__ generates CallProxy
+descriptors for public methods, and every call flows through the single
+atomic ActorCore.send_message() path.
+"""
+
 import threading
-from typing import Any
+from typing import Any, ClassVar
 from concurrent.futures import Future
-from pysync._pysync import Channel
+
+from pysync._pysync import ActorCore
+
+
+class CallProxy:
+    """
+    Descriptor that replaces a public method on an Actor subclass.
+
+    ``Counter.inc`` is replaced by ``CallProxy("inc")`` at class-creation
+    time.  When accessed on an instance, it returns a _BoundCallProxy that
+    captures the instance reference.  Calling the bound proxy sends a
+    message through ActorCore.send_message() — an atomic check+send in Rust.
+    """
+
+    __slots__ = ("_method_name",)
+
+    def __init__(self, method_name: str):
+        self._method_name = method_name
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self
+        return _BoundCallProxy(obj, self._method_name)
+
+    def __set_name__(self, owner, name):
+        self._method_name = name
+
+
+class _BoundCallProxy:
+    """A method-call proxy bound to a specific Actor instance."""
+
+    __slots__ = ("_actor", "_method_name")
+
+    def __init__(self, actor: "Actor", method_name: str):
+        self._actor = actor
+        self._method_name = method_name
+
+    def __call__(self, *args, **kwargs) -> Any:
+        # Fast zero-overhead Self-call bypass: if called from inside the Actor worker thread,
+        # call the raw method directly to avoid queue deadlock.
+        worker_id = getattr(self._actor, "_worker_thread_id", None)
+        if worker_id is not None and threading.get_ident() == worker_id:
+            method = type(self._actor)._methods[self._method_name]
+            return method(self._actor, *args, **kwargs)
+
+        return self._actor._send(self._method_name, args, kwargs)
+
+    def __repr__(self):
+        return (
+            f"<_BoundCallProxy method={self._method_name!r}"
+            f" actor={type(self._actor).__name__}>"
+        )
+
+
+class Actor:
+    """
+    An Actor model with thread-safe state isolation.
+
+    All public methods are intercepted by CallProxy descriptors (generated
+    automatically at class-creation time).  Calling a method sends an
+    asynchronous message to a dedicated worker thread and returns a
+    ``concurrent.futures.Future``.
+
+    Lifecycle hooks (called on the worker thread):
+        on_start()   — called once when the worker thread starts.
+        on_stop()    — called once before the worker thread exits.
+        on_error()   — supervision hook for unhandled exceptions.
+
+    Examples::
+
+        class Counter(Actor):
+            def __init__(self):
+                self.val = 0
+
+            def inc(self):
+                self.val += 1
+                return self.val
+
+        c = Counter()
+        f = c.inc()       # -> Future
+        assert f.result() == 1
+        c.stop()
+    """
+
+    _methods: ClassVar[dict[str, Any]] = {}
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+
+        # Scan class __dict__ and replace every public callable with CallProxy.
+        cls._methods = {}
+        for name in list(cls.__dict__):
+            if name.startswith("_") or name in ("on_start", "on_stop", "on_error"):
+                continue
+            attr = cls.__dict__[name]
+            if callable(attr) and not isinstance(
+                attr, (classmethod, staticmethod, CallProxy, property)
+            ):
+                cls._methods[name] = attr
+                setattr(cls, name, CallProxy(name))
+
+        if "__init__" in cls.__dict__:
+            cls.__init__ = _wrap_init(cls.__init__)  # type: ignore[method-assign]
+
+    def __init__(self, **kwargs):
+        _ = kwargs
+        self._worker_thread_id: int | None = None
+        self._core: ActorCore = ActorCore(self)
+        self._thread: threading.Thread | None = None
+
+    def _send(self, method_name: str, args: tuple, kwargs: dict) -> Any:
+        """Send a method-call message. Returns a Future."""
+        return self._core.send_message(method_name, args, kwargs)
+
+    def _dispatch(self, method_name: str, args, kwargs):
+        """
+        Called by the Rust worker thread to invoke a method.
+        """
+        method = type(self)._methods[method_name]
+        if kwargs is None:
+            kwargs = {}
+        if callable(method):
+            return method(self, *args, **kwargs)
+        return method
+
+    def tell(self, method_name: str, *args, **kwargs) -> None:
+        """Fire-and-forget: send a message without returning a Future."""
+        self._core.tell_message(method_name, args, kwargs)
+
+    def stop(self, timeout=None):
+        """
+        Gracefully stop the Actor.
+        """
+        self._core.stop(timeout)
+
+    # -- lifecycle hooks (called by the Rust worker thread) --
+
+    def on_start(self):
+        """Called on the worker thread when the Actor starts."""
+
+    def on_stop(self):
+        """Called on the worker thread when the Actor stops."""
+
+    def on_error(
+        self, exc: BaseException, method_name: str, args: tuple, kwargs: dict
+    ) -> bool:
+        """
+        Supervision hook.  Return True to swallow the exception (Future
+        resolves with None), or False to propagate it to the caller.
+        """
+        return False
+
+    def __repr__(self):
+        status = "running" if self._core.is_running else "stopped"
+        return f"<{type(self).__name__} status={status} id={id(self):#x}>"
+
 
 def _wrap_init(original_init):
     """
-    Wrap an __init__ method to track recursive initialization depth.
-    Sets _initialized = True only when the most-derived class's __init__ exits without exception.
-    This allows subclasses to initialize public attributes without triggering
-    AttributeError during construction.
+    Wrap __init__ to call self._core.start() after the most-derived
+    class's initializer exits successfully.
     """
+
     def wrapped(self, *args, **kwargs):
         try:
-            depth = object.__getattribute__(self, '_init_depth')
+            depth = object.__getattribute__(self, "_init_depth")
         except AttributeError:
             depth = 0
-        object.__setattr__(self, '_init_depth', depth + 1)
-        
+        object.__setattr__(self, "_init_depth", depth + 1)
+
         success = False
         try:
             original_init(self, *args, **kwargs)
             success = True
         finally:
             try:
-                current_depth = object.__getattribute__(self, '_init_depth') - 1
+                current_depth = object.__getattribute__(self, "_init_depth") - 1
             except AttributeError:
                 current_depth = 0
-            object.__setattr__(self, '_init_depth', current_depth)
+            object.__setattr__(self, "_init_depth", current_depth)
             if success and current_depth <= 0:
-                object.__setattr__(self, '_initialized', True)
+                object.__setattr__(self, "_initialized", True)
+                self._core.start()
+
     return wrapped
 
-class Actor:
-    """
-    An Actor model implementation guaranteeing thread-safe state isolation.
-    
-    All public methods and properties invoked on an Actor from external threads are intercepted
-    and executed sequentially on a dedicated background OS thread via an internal Channel mailbox.
-    Public state attributes cannot be directly read or mutated from outside the Actor thread,
-    preventing data races in multi-threaded GIL-free environments.
-    
-    Supports lifecycle hooks `on_start()` and `on_stop()`, and supervision hook `on_error()`.
-    
-    Examples:
-        >>> from pysync import Actor
-        >>> class Counter(Actor):
-        ...     def __init__(self):
-        ...         super().__init__()
-        ...         self.val = 0
-        ...     def inc(self):
-        ...         self.val += 1
-        ...         return self.val
-        >>> c = Counter()
-        >>> f = c.inc()
-        >>> f.result()
-        1
-        >>> c.stop()
-    """
-    def __new__(cls, *args, **kwargs):
-        obj = super().__new__(cls)
-        object.__setattr__(obj, '_initialized', False)
-        object.__setattr__(obj, '_init_depth', 0)
-        return obj
 
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
-        if '__init__' in cls.__dict__:
-            cls.__init__ = _wrap_init(cls.__init__)  # type: ignore[method-assign]
-
-    def __init__(self, mailbox_capacity=256):
-        self._mailbox = Channel(capacity=mailbox_capacity)
-        self._thread = None
-        self._lock = threading.Lock()
-
-    def tell(self, method_name: str, *args, **kwargs) -> None:
-        """
-        Send a non-blocking fire-and-forget message to the Actor without returning a Future.
-        
-        The method will be executed sequentially on the Actor worker thread. Any unhandled
-        exceptions will be routed to the `on_error()` supervision hook.
-        """
-        try:
-            if object.__getattribute__(self, '_stopped'):
-                raise RuntimeError("Actor is stopped")
-        except AttributeError:
-            pass
-
-        self._ensure_thread_started()
-        object.__getattribute__(self, '_mailbox').send((method_name, args, kwargs, None))
-
-    def on_start(self):
-        """Lifecycle hook called on the worker thread when the Actor starts."""
-        pass
-
-    def on_stop(self):
-        """Lifecycle hook called on the worker thread when the Actor stops."""
-        pass
-
-    def on_error(self, exc: BaseException, method_name: str, args: tuple, kwargs: dict) -> bool:
-        """
-        Supervision hook called when a method invocation raises an exception.
-        Override to implement custom logging, retry, or recovery strategies.
-        """
-        return False
-
-    def _ensure_thread_started(self):
-        """Helper to lazily start the background worker thread safely under No-GIL Python."""
-        with object.__getattribute__(self, '_lock'):
-            if object.__getattribute__(self, '_thread') is not None:
-                return
-
-            thread = threading.Thread(target=self._run_loop, name=f"Actor-{type(self).__name__}")
-            object.__setattr__(self, '_thread', thread)
-
-        thread.start()
-
-    def _run_loop(self):
-        try:
-            self.on_start()
-        except BaseException as e:
-            # BUG-7 fix: route on_start() failures through the on_error supervision
-            # hook so users can observe/handle Actor startup failures, instead of
-            # swallowing the exception silently.
-            try:
-                self.on_error(e, "on_start", (), {})
-            except BaseException:
-                pass
-
-        try:
-            while True:
-                try:
-                    msg = self._mailbox.recv()
-                    if msg is None:  # Shutdown sentinel
-                        break
-                    
-                    batch = [msg]
-                    while True:
-                        try:
-                            next_msg = self._mailbox.try_recv()
-                            batch.append(next_msg)
-                            if next_msg is None:
-                                break
-                        except RuntimeError:  # Channel is empty — normal drain end
-                            break
-                    
-                    should_exit = False
-                    for item in batch:
-                        if item is None:
-                            should_exit = True
-                            break
-                        method_name, args, kwargs, future = item
-                        try:
-                            # Bypass the interceptor to get the actual method or property
-                            method = object.__getattribute__(self, method_name)
-                            if callable(method):
-                                result = method(*args, **kwargs)
-                            else:
-                                result = method
-                            if future is not None:
-                                future.set_result(result)
-                        except BaseException as e:
-                            handled = False
-                            try:
-                                handled = bool(self.on_error(e, method_name, args, kwargs))
-                            except BaseException:
-                                pass
-                            if future is not None:
-                                if handled:
-                                    future.set_result(None)
-                                else:
-                                    future.set_exception(e)
-                    if should_exit:
-                        break
-                except ValueError:  # Mailbox closed
-                    break
-        finally:
-            try:
-                self.on_stop()
-            except BaseException:
-                pass
-
-    def __getattribute__(self, name):
-        # Private methods/attributes, stop(), and tell() are returned directly without interception
-        if name.startswith('_') or name in ('stop', 'tell'):
-            return object.__getattribute__(self, name)
-
-        current_thread = threading.current_thread()
-        try:
-            actor_thread = object.__getattribute__(self, '_thread')
-        except AttributeError:
-            actor_thread = None
-
-        # Internal thread or self-invocation: return attribute directly to avoid deadlock or stopped check
-        if actor_thread is not None and current_thread == actor_thread:
-            return object.__getattribute__(self, name)
-
-        try:
-            if object.__getattribute__(self, '_stopped'):
-                raise RuntimeError("Actor is stopped")
-        except AttributeError:
-            pass
-
-        # Check if attribute is a property descriptor on the class
-        cls_attr = getattr(type(self), name, None)
-        is_prop = isinstance(cls_attr, property)
-
-        if is_prop:
-            self._ensure_thread_started()
-            def async_prop_get():
-                future: Future[Any] = Future()
-                try:
-                    object.__getattribute__(self, '_mailbox').send((name, (), {}, future))
-                except (ValueError, RuntimeError) as err:
-                    future.set_exception(RuntimeError(f"Actor is stopped: {err}"))
-                return future
-            return async_prop_get()
-
-        try:
-            attr = object.__getattribute__(self, name)
-        except AttributeError:
-            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
-
-        if callable(attr):
-            self._ensure_thread_started()
-            def async_call(*args, **kwargs):
-                future: Future[Any] = Future()
-                try:
-                    object.__getattribute__(self, '_mailbox').send((name, args, kwargs, future))
-                except (ValueError, RuntimeError) as err:
-                    future.set_exception(RuntimeError(f"Actor is stopped: {err}"))
-                return future
-            return async_call
-
-        # Protect Actor state: forbid direct read access to public attributes to prevent data races
-        try:
-            initialized = object.__getattribute__(self, '_initialized')
-        except AttributeError:
-            initialized = False
-
-        if initialized:
-            raise AttributeError(
-                f"Public state attribute '{name}' cannot be accessed directly on Actor. "
-                "Use getter methods to read state safely."
-            )
-        return attr
-
-    def __setattr__(self, name, value):
-        current_thread = threading.current_thread()
-        try:
-            actor_thread = object.__getattribute__(self, '_thread')
-        except AttributeError:
-            actor_thread = None
-
-        try:
-            initialized = object.__getattribute__(self, '_initialized')
-        except AttributeError:
-            initialized = False
-
-        # Only allow mutations during initialization, on the actor's thread, or for private attributes
-        if not initialized or name.startswith('_') or (actor_thread is not None and current_thread == actor_thread):
-            object.__setattr__(self, name, value)
-            return
-
-        raise AttributeError(
-            f"Public state attribute '{name}' cannot be mutated directly from outside the Actor thread. "
-            "Use setter methods."
-        )
-
-    def __delattr__(self, name):
-        current_thread = threading.current_thread()
-        try:
-            actor_thread = object.__getattribute__(self, '_thread')
-        except AttributeError:
-            actor_thread = None
-
-        try:
-            initialized = object.__getattribute__(self, '_initialized')
-        except AttributeError:
-            initialized = False
-
-        if not initialized or name.startswith('_') or (actor_thread is not None and current_thread == actor_thread):
-            object.__delattr__(self, name)
-            return
-
-        raise AttributeError(
-            f"Public state attribute '{name}' cannot be deleted directly from outside the Actor thread."
-        )
-
-    def stop(self, timeout=None):
-        """
-        Gracefully stop the actor, waiting for mailbox backlog to finish.
-        """
-        object.__setattr__(self, '_stopped', True)
-        thread = object.__getattribute__(self, '_thread')
-        if thread is not None:
-            try:
-                object.__getattribute__(self, '_mailbox').send(None, timeout=timeout)
-            except (ValueError, TimeoutError):
-                pass
-            current_thread = threading.current_thread()
-            if current_thread != thread:
-                thread.join(timeout=timeout)
-            try:
-                object.__getattribute__(self, '_mailbox').close()
-            except Exception:
-                pass
-
-# Wrap Actor's own __init__
+# Wrap Actor's own __init__ (handles the case where users don't subclass).
 Actor.__init__ = _wrap_init(Actor.__init__)  # type: ignore[method-assign]
+

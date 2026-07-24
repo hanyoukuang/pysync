@@ -1,10 +1,10 @@
-use std::time::Duration;
-use pyo3::prelude::*;
-use pyo3::exceptions::{PyValueError, PyTypeError, PyRuntimeError, PyTimeoutError};
-use crossbeam_channel::{Select, Receiver, Sender};
 use crate::channel::{RecvOp, SendOp};
+use crossbeam_channel::{Receiver, Select, Sender};
 use parking_lot::Mutex;
+use pyo3::exceptions::{PyRuntimeError, PyTimeoutError, PyTypeError, PyValueError};
+use pyo3::prelude::*;
 use std::collections::HashMap;
+use std::time::Duration;
 
 /// An internal enum representing parsed operation types.
 enum OpType {
@@ -42,7 +42,10 @@ pub fn select(
     for op in &ops {
         if let Ok(recv_op_bound) = op.cast::<RecvOp>() {
             let recv_op = recv_op_bound.borrow();
-            parsed_ops.push(OpType::Recv(recv_op.receiver.clone(), recv_op.close_rx.clone()));
+            parsed_ops.push(OpType::Recv(
+                recv_op.receiver.clone(),
+                recv_op.close_rx.clone(),
+            ));
         } else if let Ok(send_op_bound) = op.cast::<SendOp>() {
             let send_op = send_op_bound.borrow();
             parsed_ops.push(OpType::Send(
@@ -51,7 +54,9 @@ pub fn select(
                 send_op.close_rx.clone(),
             ));
         } else {
-            return Err(PyTypeError::new_err("Operations must be of type RecvOp or SendOp"));
+            return Err(PyTypeError::new_err(
+                "Operations must be of type RecvOp or SendOp",
+            ));
         }
     }
 
@@ -77,7 +82,15 @@ pub fn select(
         }
     }
 
-    let timeout_duration = timeout.map(|t| Duration::from_secs_f64(t.max(0.0)));
+    let timeout_duration = match timeout {
+        Some(t) => {
+            if t < 0.0 {
+                return Err(PyValueError::new_err("Timeout must be non-negative"));
+            }
+            Some(Duration::from_secs_f64(t))
+        }
+        None => None,
+    };
 
     // Step 3: Block and perform selection. Releases the GIL to allow other threads to run.
     let sel_res = py.detach(|| -> SelectResult {
@@ -118,12 +131,10 @@ pub fn select(
         };
 
         match &parsed_ops[op_idx] {
-            OpType::Recv(rx, _) => {
-                match oper.recv(rx) {
-                    Ok(res) => SelectResult::RecvSuccess(op_idx, res),
-                    Err(_) => SelectResult::RecvClosed,
-                }
-            }
+            OpType::Recv(rx, _) => match oper.recv(rx) {
+                Ok(res) => SelectResult::RecvSuccess(op_idx, res),
+                Err(_) => SelectResult::RecvClosed,
+            },
             OpType::Send(tx, item_mutex, _) => {
                 let item = match item_mutex.lock().take() {
                     Some(it) => it,
@@ -140,10 +151,13 @@ pub fn select(
     match sel_res {
         SelectResult::RecvSuccess(idx, item) => Ok((idx, Some(item))),
         SelectResult::SendSuccess(idx) => Ok((idx, None)),
-        SelectResult::RecvClosed => Err(PyValueError::new_err("Selected channel is closed and empty")),
+        SelectResult::RecvClosed => Err(PyValueError::new_err(
+            "Selected channel is closed and empty",
+        )),
         SelectResult::SendClosed => Err(PyValueError::new_err("Selected channel is closed")),
         SelectResult::ItemConsumed => Err(PyRuntimeError::new_err("Send item already consumed")),
-        SelectResult::Timeout => Err(PyTimeoutError::new_err("select() timed out waiting for ready channel")),
+        SelectResult::Timeout => Err(PyTimeoutError::new_err(
+            "select() timed out waiting for ready channel",
+        )),
     }
 }
-
