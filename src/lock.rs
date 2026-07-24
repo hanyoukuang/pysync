@@ -98,17 +98,25 @@ impl RwLockReadGuard {
             return Ok(s.clone());
         }
 
-        // Slow-path: release GIL and block
+        // Slow-path: release GIL and block with segmented retry loop
         let lock = {
             let s_ref = s.borrow();
             s_ref.lock.clone()
         };
 
-        let wrapper = s.py().detach(|| {
-            if is_reentrant {
-                SendableArcReadGuard(lock.read_arc_recursive())
+        let wrapper = s.py().detach(|| loop {
+            let try_opt = if is_reentrant {
+                if let Some(g) = lock.try_read_recursive_arc() {
+                    Some(g)
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    None
+                }
             } else {
-                SendableArcReadGuard(lock.read_arc())
+                lock.try_read_arc_for(std::time::Duration::from_millis(500))
+            };
+            if let Some(guard) = try_opt {
+                return SendableArcReadGuard(guard);
             }
         });
 
@@ -160,12 +168,16 @@ impl RwLockWriteGuard {
             let mut s_mut = s.borrow_mut();
             s_mut.guard = Some(guard);
         } else {
-            // Slow-path: release GIL and block waiting for exclusive write lock.
+            // Slow-path: release GIL and block with 500ms segmented retry loop.
             let lock = {
                 let s_ref = s.borrow();
                 s_ref.lock.clone()
             };
-            let wrapper = s.py().detach(|| SendableArcWriteGuard(lock.write_arc()));
+            let wrapper = s.py().detach(|| loop {
+                if let Some(guard) = lock.try_write_arc_for(std::time::Duration::from_millis(500)) {
+                    return SendableArcWriteGuard(guard);
+                }
+            });
             let mut s_mut = s.borrow_mut();
             s_mut.guard = Some(wrapper.0);
         }
