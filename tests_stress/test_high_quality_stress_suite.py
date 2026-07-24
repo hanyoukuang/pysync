@@ -160,8 +160,9 @@ def test_100_actor_swarm_dag_topology():
         assert total_processed == TOTAL_MSGS, f"预期总处理消息数 {TOTAL_MSGS}，实际 {total_processed}"
 
     finally:
-        for actor in actors:
-            actor.stop()
+        with ThreadGroup() as tg:
+            for actor in actors:
+                tg.spawn(actor.stop)
 
     print(f"\n[100 Actor Swarm] 100 个真实 Actor 集群完成 {TOTAL_MSGS:,} 次拓扑消息并行通信与调度")
 
