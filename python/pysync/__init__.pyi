@@ -4,6 +4,8 @@ from concurrent.futures import Future
 K = TypeVar("K")
 V = TypeVar("V")
 
+__version__: str
+
 class Channel:
     """
     A fast, thread-safe message passing channel based on Rust's crossbeam-channel.

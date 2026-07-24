@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "pysync-nogil"
-version = "0.1.6"
+version = "0.1.7"
 description = "High-Performance Modern Concurrency Primitives for Free-Threaded Python 3.14t (No-GIL)"
 readme = "README.md"
 requires-python = ">=3.14"
