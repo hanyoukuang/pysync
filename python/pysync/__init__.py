@@ -17,7 +17,7 @@ from pysync.dict import ConcurrentDict
 from pysync.group import ThreadGroup
 from pysync.actor import Actor
 
-__version__ = "0.1.7"
+__version__ = "0.1.8"
 
 __all__ = [
     "Actor",

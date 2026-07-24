@@ -267,8 +267,8 @@ impl ActorCore {
                 }
                 Some(_) => Err(crossbeam_channel::RecvTimeoutError::Timeout),
                 None => {
-                    // Default fallback timeout of 5 seconds to prevent hanging h.join()
-                    py.detach(move || done_rx.recv_timeout(std::time::Duration::from_secs(5)))
+                    // Fast fallback timeout of 100ms to prevent Windows OS thread hanging
+                    py.detach(move || done_rx.recv_timeout(std::time::Duration::from_millis(100)))
                 }
             };
 
