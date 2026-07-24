@@ -140,8 +140,10 @@ def test_100_actor_swarm_dag_topology():
             self.processed += payload
             return self.processed
 
-    # 真实实例化 100 个 Actor
+    t0 = time.monotonic()
     actors = [NodeActor(i) for i in range(100)]
+    t1 = time.monotonic()
+    print(f"\n[Timing 1] 创建 100 个 Actor 耗时: {t1 - t0:.3f}s", flush=True)
 
     try:
         futures = []
@@ -150,19 +152,29 @@ def test_100_actor_swarm_dag_topology():
             actor_target = actors[i % 100]
             futures.append(actor_target.process_msg(1))
 
+        t2 = time.monotonic()
+        print(f"[Timing 2] 发送 10,000 条消息投递耗时: {t2 - t1:.3f}s", flush=True)
+
         futures[-1].result(timeout=10.0)
+        t3 = time.monotonic()
+        print(f"[Timing 3] 等待最后消息 Future 完成耗时: {t3 - t2:.3f}s", flush=True)
 
         total_processed = 0
         for actor in actors:
             res = actor.process_msg(0).result(timeout=5.0)
             total_processed += res
 
+        t4 = time.monotonic()
+        print(f"[Timing 4] 收集 100 个 Actor 结果耗时: {t4 - t3:.3f}s", flush=True)
         assert total_processed == TOTAL_MSGS, f"预期总处理消息数 {TOTAL_MSGS}，实际 {total_processed}"
 
     finally:
+        t5_start = time.monotonic()
         with ThreadGroup() as tg:
             for actor in actors:
                 tg.spawn(actor.stop)
+        t5_end = time.monotonic()
+        print(f"[Timing 5] ThreadGroup 并发停止 100 个 Actor 耗时: {t5_end - t5_start:.3f}s", flush=True)
 
     print(f"\n[100 Actor Swarm] 100 个真实 Actor 集群完成 {TOTAL_MSGS:,} 次拓扑消息并行通信与调度")
 

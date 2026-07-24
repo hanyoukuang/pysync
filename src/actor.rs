@@ -258,29 +258,35 @@ impl ActorCore {
                 return Ok(());
             }
 
-            if let Some(t) = timeout {
-                if t > 0.0 {
-                    let done_rx = self.done_rx.clone();
-                    let duration = std::time::Duration::from_secs_f64(t);
-                    let wait_res = py.detach(move || done_rx.recv_timeout(duration));
+            let done_rx = self.done_rx.clone();
+            let timeout_duration = timeout.map(std::time::Duration::from_secs_f64);
 
-                    if wait_res.is_ok() {
-                        py.detach(move || {
-                            let _ = h.join();
-                        });
-                        self.state.store(STATE_STOPPED, Ordering::Release);
-                    } else {
-                        // Timeout reached, return handle to lock for drop clean up
-                        *self.handle.lock() = Some(h);
-                    }
-                    return Ok(());
+            let wait_res = match timeout_duration {
+                Some(dur) if dur > std::time::Duration::from_secs(0) => {
+                    py.detach(move || done_rx.recv_timeout(dur))
                 }
-            }
+                Some(_) => Err(crossbeam_channel::RecvTimeoutError::Timeout),
+                None => {
+                    // Default fallback timeout of 5 seconds to prevent hanging h.join()
+                    py.detach(move || done_rx.recv_timeout(std::time::Duration::from_secs(5)))
+                }
+            };
 
-            py.detach(move || {
-                let _ = h.join();
-            });
-            self.state.store(STATE_STOPPED, Ordering::Release);
+            if wait_res.is_ok() {
+                py.detach(move || {
+                    let _ = h.join();
+                });
+                self.state.store(STATE_STOPPED, Ordering::Release);
+            } else if timeout.is_none() {
+                // Background thread cleanup for default fallback timeout
+                std::thread::spawn(move || {
+                    let _ = h.join();
+                });
+                self.state.store(STATE_STOPPED, Ordering::Release);
+            } else {
+                // Explicit timeout reached, return handle to lock
+                *self.handle.lock() = Some(h);
+            }
         }
 
         Ok(())
